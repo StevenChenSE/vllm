@@ -41,6 +41,7 @@
 #include <hip/hip_bf16.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/prctl.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstdio>
@@ -177,6 +178,10 @@ extern "C" int hostar_init(const char* shm, int rank, int max_elems,
     unlink(rdv);
     fd = (int)syscall(SYS_memfd_create, "hostar", 0u);
     if (fd < 0 || ftruncate(fd, bytes) != 0) return -1;
+    // Peers (sibling TP worker processes, not parent/child) open our memfd via
+    // /proc/<pid>/fd.  With kernel.yama.ptrace_scope=1 (default on most distros)
+    // that open is denied unless we opt into being traced by anyone.
+    prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY);
     char buf[64];
     int len = snprintf(buf, sizeof(buf), "%d %d", (int)getpid(), fd);
     int rf = open(rdv, O_CREAT | O_WRONLY | O_TRUNC, 0666);
@@ -184,19 +189,27 @@ extern "C" int hostar_init(const char* shm, int rank, int max_elems,
     close(rf);
   } else {
     int pid = -1, pfd = -1;
-    for (int t = 0; t < 500 && pid < 0; t++) {  // wait for rank 0 (~5s max)
+    // Peers wait for rank 0's rendezvous file AND a successfully opened memfd.
+    // A stale rendezvous from a previous server instance (rank-0 pid already
+    // dead, e.g. the /tmp/vllm_hostar.rdv left behind by an earlier crash) must
+    // not abort init: keep polling until rank 0 publishes a live memfd.  Rank 0
+    // unlinks+rewrites the file on every init, so an open failure here simply
+    // means we read the previous instance's stale contents — retry.
+    for (int t = 0; t < 1000 && fd < 0; t++) {  // ~10s max
       int rf = open(rdv, O_RDONLY);
       if (rf >= 0) {
         char buf[64] = {0};
         if (read(rf, buf, sizeof(buf) - 1) > 0) sscanf(buf, "%d %d", &pid, &pfd);
         close(rf);
       }
-      if (pid < 0) usleep(10000);
+      if (pid >= 0) {
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/fd/%d", pid, pfd);
+        fd = open(path, O_RDWR);  // dup rank 0's memfd into this process
+      }
+      pid = -1;
+      if (fd < 0) usleep(10000);
     }
-    if (pid < 0) return -1;
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/fd/%d", pid, pfd);
-    fd = open(path, O_RDWR);  // dup rank 0's memfd into this process
     if (fd < 0) return -1;
   }
   void* p = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);

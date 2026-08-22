@@ -1,3 +1,4 @@
+import os
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """High-Performance Triton-only Attention layer."""
@@ -45,6 +46,27 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     get_kv_quant_mode,
 )
+
+# RDNA3 HIP/WMMA paged-prefill kernel (gfx1100). Only engages when the
+# op is compiled in, we're on gfx11, head_size==128, fp16/bf16 non-quant KV
+# and the batch is a pure causal prefill — otherwise falls back to the
+# Triton unified kernel below.
+try:
+    from vllm.v1.attention.ops.rocm_paged_prefill_attn import (
+        is_available as rdna3_prefill_is_available,
+        paged_prefill_attn_rdna3,
+        supports_shape as rdna3_prefill_supports_shape,
+    )
+except ImportError:  # pragma: no cover
+
+    def rdna3_prefill_is_available() -> bool:
+        return False
+
+    def rdna3_prefill_supports_shape(*_a, **_k) -> bool:
+        return False
+
+    def paged_prefill_attn_rdna3(*_a, **_k):  # pragma: no cover
+        raise NotImplementedError
 
 logger = init_logger(__name__)
 
@@ -648,6 +670,53 @@ class TritonAttentionImpl(AttentionImpl):
         softmax_segm_expsum = attn_metadata.softmax_segm_expsum
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
+
+        # RDNA3 WMMA paged-prefill fast path (gfx1100). Only when every
+        # constraint holds: compiled op, fp16/bf16 non-quant KV, head 128,
+        # pure causal prefill with no alibi/SWA/sinks/softcap/mm/rswa.
+        # The Triton unified kernel remains the fallback for everything else.
+        if (
+            max_seqlen_q > 1
+            and not self._is_per_token_head_quant
+            and not is_quantized_kv_cache(self.kv_cache_dtype)
+            and rdna3_prefill_is_available()
+            and rdna3_prefill_supports_shape(self.head_size,
+                                             key_cache.shape[1], query.dtype)
+            and attn_metadata.causal is True
+            and self.alibi_slopes is None
+            and self.sliding_window == (-1, -1)
+            and self.sinks is None
+            and self.logits_soft_cap == 0
+            and mm_prefix_range_tensor is None
+            and attn_metadata.rswa_window is None
+            # Opt-in: end-to-end prefill showed no gain over the Triton
+            # unified kernel on this stack (chunked prefill + MTP + 27B),
+            # so the WMMA path is disabled unless explicitly requested.
+            and os.environ.get("VLLM_ENABLE_RDNA3_PREFILL", "0") == "1"
+        ):
+            # kv_cache: [B, H, N, 2*hs] -> key/value [B, N, H, hs].
+            # WMMA expects 5-D key [B, H, hs//x, N, x] and 4-D value
+            # [B, H, hs, N] (split_kv_cache layout).
+            B, N = key_cache.shape[0], key_cache.shape[1]
+            H = key_cache.shape[2]
+            hs = key_cache.shape[3]
+            x = 16 // key_cache.element_size()
+            k5 = key_cache.permute(0, 2, 3, 1).reshape(B, H, hs // x, N, x)
+            v4 = value_cache.permute(0, 2, 3, 1).reshape(B, H, hs, N)
+            paged_prefill_attn_rdna3(
+                out=output[:num_actual_tokens],
+                query=query[:num_actual_tokens],
+                k_chunk=key[:num_actual_tokens],
+                v_chunk=value[:num_actual_tokens],
+                key_cache=k5,
+                value_cache=v4,
+                block_table=block_table,
+                cu_seqlens_q=cu_seqlens_q,
+                seq_lens=seqused_k,
+                sm_scale=self.scale,
+                causal=True,
+            )
+            return output
 
         unified_attention(
             q=query[:num_actual_tokens],
