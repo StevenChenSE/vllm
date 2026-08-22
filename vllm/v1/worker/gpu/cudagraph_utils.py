@@ -213,6 +213,12 @@ class CudaGraphManager:
             decode_query_lens = [
                 x[2] + num_new_sampled_tokens_per_step for x in num_spec_per_batch_size
             ]
+        elif speculative_config is not None:
+            # Multi-bucket dynamic verification:
+            # Captures buckets for [1, 2, 4, self.decode_query_len] to allow
+            # fast dynamic target verification when early-stopping occurs.
+            buckets = [1, 2, 4, self.decode_query_len]
+            decode_query_lens = sorted(list({b for b in buckets if b <= self.decode_query_len}))
         else:
             decode_query_lens = [self.decode_query_len]
 

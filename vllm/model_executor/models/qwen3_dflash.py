@@ -614,6 +614,23 @@ class DFlashQwen3Model(nn.Module):
             self._build_fused_kv_buffers()
 
         num_ctx = context_states.shape[0]
+        # If prompt length exceeds the drafter's sliding window (e.g. 2048),
+        # only the most recent window of tokens is ever attended to by the drafter.
+        # Slicing saves up to 8x-16x redundant KV projection GEMM & cache write overhead!
+        max_sw = getattr(self.config, "sliding_window", None) or 2048
+        if num_ctx > max_sw:
+            context_states = context_states[-max_sw:]
+            context_positions = context_positions[-max_sw:]
+            if context_slot_mapping is not None:
+                if isinstance(context_slot_mapping, (list, tuple)):
+                    context_slot_mapping = [
+                        sm[-max_sw:] if sm is not None else None
+                        for sm in context_slot_mapping
+                    ]
+                else:
+                    context_slot_mapping = context_slot_mapping[-max_sw:]
+            num_ctx = max_sw
+
         if context_states.dtype != self._hidden_norm_weight.dtype:
             context_states = context_states.to(dtype=self._hidden_norm_weight.dtype)
         L = self._num_attn_layers

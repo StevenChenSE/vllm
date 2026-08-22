@@ -2278,6 +2278,9 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
+            # Strip trailing -1 (truncated draft tokens from p_min early stopping)
+            while spec_token_ids and spec_token_ids[-1] == -1:
+                spec_token_ids.pop()
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
