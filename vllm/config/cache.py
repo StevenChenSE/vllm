@@ -52,6 +52,7 @@ CacheDType = Literal[
     "int4_per_token_head",
     "int8_per_token_head",
     "fp8_per_token_head",
+    "int8_per_tensor",
     "nvfp4",
     "nvfp4_4over6",
 ]

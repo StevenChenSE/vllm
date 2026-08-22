@@ -52,8 +52,11 @@ def reshape_and_cache_kernel_flash(
     block_size: tl.constexpr,
     x: tl.constexpr,
     USE_HEAD_MAJOR_LAYOUT: tl.constexpr,
-    # FP8 flags
+    # Quant flags
     FP8_KV_CACHE: tl.constexpr,
+    INT8_KV_CACHE: tl.constexpr,
+    IS_ROCM: tl.constexpr,
+    IS_CUDA: tl.constexpr,
     # tune parameters
     TILE_SIZE: tl.constexpr,
 ):
@@ -106,7 +109,18 @@ def reshape_and_cache_kernel_flash(
     key_load = tl.load(
         key_ptr + src_key_idx + tile_pos, mask=tile_pos < (num_heads * head_size)
     )
-    if FP8_KV_CACHE:
+    if INT8_KV_CACHE:
+        # INT8 per-tensor: quantize to [-128, 127] with round-to-nearest-even.
+        k_scale_val = tl.load(k_scale)
+        k_scaled = key_load.to(tl.float32) / k_scale_val
+        if IS_ROCM:
+            k_rounded = tl.extra.hip.libdevice.nearbyint(k_scaled)
+        elif IS_CUDA:
+            k_rounded = tl.extra.cuda.libdevice.rint(k_scaled)
+        else:
+            k_rounded = tl.floor(k_scaled + 0.5)
+        key_tile = tl.clamp(k_rounded, -128.0, 127.0).to(tl.int8)
+    elif FP8_KV_CACHE:
         # tl.store will do the correct implicit cast to fp8,
         # based on the key_cache_ptr.dtype.element_ty
         key_tile = key_load if key_load.dtype.is_fp8() else key_load / tl.load(k_scale)
@@ -117,7 +131,17 @@ def reshape_and_cache_kernel_flash(
     value_load = tl.load(
         value_ptr + src_value_idx + tile_pos, mask=tile_pos < (num_heads * head_size)
     )
-    if FP8_KV_CACHE:
+    if INT8_KV_CACHE:
+        v_scale_val = tl.load(v_scale)
+        v_scaled = value_load.to(tl.float32) / v_scale_val
+        if IS_ROCM:
+            v_rounded = tl.extra.hip.libdevice.nearbyint(v_scaled)
+        elif IS_CUDA:
+            v_rounded = tl.extra.cuda.libdevice.rint(v_scaled)
+        else:
+            v_rounded = tl.floor(v_scaled + 0.5)
+        value_tile = tl.clamp(v_rounded, -128.0, 127.0).to(tl.int8)
+    elif FP8_KV_CACHE:
         if value_load.dtype.is_fp8():
             value_tile = value_load
         else:
@@ -399,20 +423,25 @@ def triton_reshape_and_cache_flash(
         f"on this device: an FP8 KV cache needs native fp8e4nv (SM89+). Use "
         f"--kv-cache-dtype bfloat16 (or float16 on SM75)."
     )
-    kv_cache_torch_dtype = (
-        current_platform.fp8_dtype()
-        if is_quantized_kv_cache(kv_cache_dtype)
-        else key_cache.dtype
-    )
+    is_int8_per_tensor = kv_cache_dtype == "int8_per_tensor"
+    is_int8 = kv_cache_dtype.startswith("int8")
+    if is_int8:
+        kv_cache_torch_dtype = torch.int8
+    elif is_quantized_kv_cache(kv_cache_dtype):
+        kv_cache_torch_dtype = current_platform.fp8_dtype()
+    else:
+        kv_cache_torch_dtype = key_cache.dtype
 
-    if key_cache.dtype != kv_cache_torch_dtype and is_quantized_kv_cache(
-        kv_cache_dtype
+    if (
+        key_cache.dtype != kv_cache_torch_dtype
+        and is_quantized_kv_cache(kv_cache_dtype)
     ):
         # to avoid erounous implicit cast in triton kernel (tl.store to uint8)
         # (e.g. explicit cast to fp8e4m3fnuz is not supported in triton 3.4)
         key_cache = key_cache.view(kv_cache_torch_dtype)
         value_cache = value_cache.view(kv_cache_torch_dtype)
-    FP8_KV_CACHE = is_quantized_kv_cache(kv_cache_dtype)
+    FP8_KV_CACHE = is_quantized_kv_cache(kv_cache_dtype) and not is_int8
+    INT8_KV_CACHE = is_int8_per_tensor
     # heuristics instead of autotuning
     TILE_SIZE = min(2048, triton.next_power_of_2(n))
     if current_platform.is_rocm() or current_platform.is_xpu():
@@ -453,6 +482,9 @@ def triton_reshape_and_cache_flash(
         x=x,
         USE_HEAD_MAJOR_LAYOUT=use_head_major_layout,
         FP8_KV_CACHE=FP8_KV_CACHE,
+        INT8_KV_CACHE=INT8_KV_CACHE,
+        IS_ROCM=current_platform.is_rocm(),
+        IS_CUDA=current_platform.is_cuda(),
         # autotune parameters
         TILE_SIZE=TILE_SIZE,
         num_warps=num_warps,

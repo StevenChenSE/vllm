@@ -301,6 +301,7 @@ class TritonAttentionBackend(AttentionBackend):
         "int4_per_token_head",
         "int8_per_token_head",
         "fp8_per_token_head",
+        "int8_per_tensor",
     ]
 
     @staticmethod
@@ -614,6 +615,7 @@ class TritonAttentionImpl(AttentionImpl):
             key_cache, value_cache = kv_cache.split(hs, dim=-1)
             if (
                 is_quantized_kv_cache(self.kv_cache_dtype)
+                and self.kv_cache_dtype != "int8_per_tensor"
                 and key_cache.dtype != self.fp8_dtype
             ):
                 key_cache = key_cache.view(self.fp8_dtype)

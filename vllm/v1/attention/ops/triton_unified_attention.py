@@ -47,6 +47,8 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
     - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
       tensor-wide scale, unless Q is also FP8 and the caller folds the scales
       into the attention score and output accumulator.
+    - ``KV_QUANT_MODE == 11`` (INT8 per-tensor): plain cast.  Scale is
+      folded into softmax_scale (k) and applied once on the accumulator (v).
     """
     if KV_QUANT_MODE == 1:
         if Q.dtype.is_fp8():
@@ -385,6 +387,11 @@ def kernel_unified_attention(
     if USE_FP8_Q_DESCALE:
         score_scale = scale * tl.load(q_scale) * tl.load(k_scale)
         value_scale = tl.load(v_scale)
+    if KV_QUANT_MODE == 11:
+        # INT8 per-tensor: fold k_scale into the softmax scale, apply
+        # v_scale once on the accumulated output (post-loop).
+        score_scale = scale * tl.load(k_scale)
+        value_scale = tl.load(v_scale)
 
     context_len = seq_len - cur_batch_query_len
 
@@ -587,7 +594,7 @@ def kernel_unified_attention(
 
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:
-        if USE_FP8_Q_DESCALE:
+        if USE_FP8_Q_DESCALE or KV_QUANT_MODE == 11:
             acc *= value_scale
         # Store per-segment partials; finalized by ``reduce_segments``.
         if USE_TD_QO:
@@ -644,7 +651,7 @@ def kernel_unified_attention(
         )
     else:
         acc = acc / L[:, None]
-        if USE_FP8_Q_DESCALE:
+        if USE_FP8_Q_DESCALE or KV_QUANT_MODE == 11:
             acc *= value_scale
         if USE_FP8:
             acc = acc * tl.load(out_scale)

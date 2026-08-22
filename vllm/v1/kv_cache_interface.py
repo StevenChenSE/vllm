@@ -54,6 +54,7 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_K3V4_NC = 8
     TURBOQUANT_3BIT_NC = 9
     INT2_PER_TOKEN_HEAD = 10
+    INT8_PER_TENSOR = 11  # per-tensor symmetric int8 (RDNA3, JartX)
 
     @property
     def is_per_token_head(self) -> bool:
@@ -86,6 +87,8 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.INT4_PER_TOKEN_HEAD
     if kv_cache_dtype == "int8_per_token_head":
         return KVQuantMode.INT8_PER_TOKEN_HEAD
+    if kv_cache_dtype == "int8_per_tensor":
+        return KVQuantMode.INT8_PER_TENSOR
     if kv_cache_dtype == "fp8_per_token_head":
         return KVQuantMode.FP8_PER_TOKEN_HEAD
     if kv_cache_dtype.startswith("nvfp4"):
