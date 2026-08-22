@@ -52,7 +52,7 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     target_language_model = (
         target_model.get_language_model()
         if hasattr(target_model, "get_language_model")
-        else target_model
+        else getattr(target_model, "language_model", target_model)
     )
     # MuseGlimmerForCausalLM marks its inner MuseGlimmerModel as the language
     # model, so get_language_model() already returns the inner module and has
@@ -64,7 +64,7 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     if get_pp_group().world_size == 1:
         target_embed = getattr(target_inner, "embed_tokens", None) or getattr(
             target_inner, "embedding", None
-        )
+        ) or getattr(getattr(target_language_model, "model", None), "embed_tokens", None)
         draft_embed = getattr(draft_inner, "embed_tokens", None)
         if target_embed is not None and _should_share(
             dflash_model, "has_own_embed_tokens", draft_embed, target_embed

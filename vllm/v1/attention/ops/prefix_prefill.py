@@ -227,9 +227,14 @@ def _fwd_kernel(
 
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
 
+    if SLIDING_WINDOW > 0:
+        ctx_start_n = tl.maximum(0, ((cur_batch_ctx_len - SLIDING_WINDOW) // BLOCK_SIZE) * BLOCK_SIZE)
+    else:
+        ctx_start_n = 0
+
     # compute query against context (no causal mask here)
     for start_n in tl.range(
-        0, cur_batch_ctx_len, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache
+        ctx_start_n, cur_batch_ctx_len, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache
     ):
         # Under a block size of 544 (Qwen/Qwen3-Next-80B-A3B-Thinking),
         # replace one physical block every 17 32-Tile blocks
@@ -310,11 +315,11 @@ def _fwd_kernel(
 
         # compute running maximum
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
-        p = tl.exp(qk - m_ij[:, None])
-        p = tl.where(m_ij[:, None] == float("-inf"), 0.0, p)
+        diff_qk = tl.where((qk == float("-inf")) | (m_ij[:, None] == float("-inf")), -float("inf"), qk - m_ij[:, None])
+        p = tl.where((m_ij[:, None] == float("-inf")) | (qk == float("-inf")), 0.0, tl.exp(diff_qk))
         l_ij = tl.sum(p, axis=1)
-        alpha = tl.exp(m_i - m_ij)
-        alpha = tl.where(m_i == float("-inf"), 0.0, alpha)
+        safe_diff = tl.where((m_i == float("-inf")) | (m_ij == float("-inf")), -float("inf"), m_i - m_ij)
+        alpha = tl.where(m_i == float("-inf"), 0.0, tl.exp(safe_diff))
         acc = acc * alpha[:, None]
 
         # update acc
@@ -440,12 +445,11 @@ def _fwd_kernel(
 
         # compute running maximum
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
-        p = tl.exp(qk - m_ij[:, None])
-        p = tl.where(m_ij[:, None] == float("-inf"), 0.0, p)
+        diff_qk = tl.where((qk == float("-inf")) | (m_ij[:, None] == float("-inf")), -float("inf"), qk - m_ij[:, None])
+        p = tl.where((m_ij[:, None] == float("-inf")) | (qk == float("-inf")), 0.0, tl.exp(diff_qk))
         l_ij = tl.sum(p, axis=1)
-        alpha = tl.exp(m_i - m_ij)
-        # To prevent NaN from appearing in the first round
-        alpha = tl.where(m_i == float("-inf"), 0.0, alpha)
+        safe_diff = tl.where((m_i == float("-inf")) | (m_ij == float("-inf")), -float("inf"), m_i - m_ij)
+        alpha = tl.where(m_i == float("-inf"), 0.0, tl.exp(safe_diff))
         acc = acc * alpha[:, None]
 
         # update acc
@@ -475,7 +479,7 @@ def _fwd_kernel(
         l_i = l_i * alpha + l_ij
         m_i = m_ij
 
-    acc = acc / (l_i[:, None] + 1e-10)
+    acc = tl.where(l_i[:, None] == 0.0, 0.0, acc / (l_i[:, None] + 1e-10))
 
     # initialize pointers to output
     off_o = (
@@ -647,11 +651,13 @@ def _fwd_kernel_alibi(
         # -- compute m_ij, p, l_ij
         m_ij = tl.max(qk, 1)
         m_i_new = tl.maximum(m_i, m_ij)
-        p = tl.math.exp(qk - m_i_new[:, None])
+        diff_qk = tl.where((qk == float("-inf")) | (m_i_new[:, None] == float("-inf")), -float("inf"), qk - m_i_new[:, None])
+        p = tl.where((m_i_new[:, None] == float("-inf")) | (qk == float("-inf")), 0.0, tl.math.exp(diff_qk))
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i
 
-        alpha = tl.math.exp(m_i - m_i_new)
+        safe_diff = tl.where(m_i == float("-inf"), -float("inf"), m_i - m_i_new)
+        alpha = tl.where(m_i == float("-inf"), 0.0, tl.math.exp(safe_diff))
         l_i_new = alpha * l_i + l_ij
         # -- update output accumulator --
         # scale p
@@ -729,11 +735,13 @@ def _fwd_kernel_alibi(
         # -- compute m_ij, p, l_ij
         m_ij = tl.max(qk, 1)
         m_i_new = tl.maximum(m_i, m_ij)
-        p = tl.math.exp(qk - m_i_new[:, None])
+        diff_qk = tl.where((qk == float("-inf")) | (m_i_new[:, None] == float("-inf")), -float("inf"), qk - m_i_new[:, None])
+        p = tl.where((m_i_new[:, None] == float("-inf")) | (qk == float("-inf")), 0.0, tl.math.exp(diff_qk))
         l_ij = tl.sum(p, 1)
         # -- update m_i and l_i
 
-        alpha = tl.math.exp(m_i - m_i_new)
+        safe_diff = tl.where(m_i == float("-inf"), -float("inf"), m_i - m_i_new)
+        alpha = tl.where(m_i == float("-inf"), 0.0, tl.math.exp(safe_diff))
         l_i_new = alpha * l_i + l_ij
         # -- update output accumulator --
         # scale p

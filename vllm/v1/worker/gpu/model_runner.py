@@ -1869,8 +1869,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         f"[PROFILE] Target_Fwd={fwd_ms:6.2f}ms ({cg_mode}, toks={num_toks:2d}) | "
                         f"Drafter_Propose={t_prop_ms:6.2f}ms | "
                         f"Sampled={num_sampled.tolist() if hasattr(num_sampled, 'tolist') else num_sampled} "
-                        f"Rejected={num_rejected.tolist() if hasattr(num_rejected, 'tolist') else num_rejected}",
-                        flush=True
+                        f"Rejected={num_rejected.tolist() if hasattr(num_rejected, 'tolist') else num_rejected} | "
+                        f"Draft={draft_tokens.tolist() if hasattr(draft_tokens, 'tolist') else draft_tokens}",
+                        flush=True,
                     )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import Any
 
 import torch
@@ -22,6 +23,8 @@ def _selector_walk_kernel(
     seeds_ptr,
     tokens_ptr,
     realized_scores_ptr,
+    p_min,
+    n_min,
     num_steps: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -36,6 +39,8 @@ def _selector_walk_kernel(
     temperature = tl.load(temperature_ptr + req_state, mask=valid, other=0.0)
     seed = tl.load(seeds_ptr + req_state, mask=valid, other=0)
     previous = 0
+    active = True
+    valid_count = 0
     for step in range(num_steps):
         flat = row * num_steps + step
         score_base = (flat * top_k + previous) * top_k
@@ -68,9 +73,27 @@ def _selector_walk_kernel(
             scores,
             mask=mask & valid,
         )
+
+        if p_min > 0.0:
+            chosen_score = tl.load(scores_ptr + score_base + index, mask=valid, other=0.0)
+            diff = scores - chosen_score
+            sum_exp = tl.sum(tl.where(mask & valid, tl.exp(diff), 0.0))
+            prob = 1.0 / sum_exp
+            if prob < p_min:
+                active = False
+
         token = tl.load(candidate_ptr + candidate_base + index, mask=valid, other=0)
-        tl.store(tokens_ptr + flat, token, mask=valid)
+        stored_token = tl.where(active, token, -1)
+        tl.store(tokens_ptr + flat, stored_token, mask=valid)
+        if active:
+            valid_count += 1
         previous = index
+
+    if n_min > 0:
+        if valid_count < n_min:
+            for step in range(num_steps):
+                flat = row * num_steps + step
+                tl.store(tokens_ptr + flat, -1, mask=valid)
 
 
 @triton.jit
@@ -111,8 +134,10 @@ class DFlash2Speculator(DFlashSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
-        draft_config = self.draft_model_config.hf_config.dflash_config
-        self.selector_top_k = int(draft_config["selector_top_k"])
+        draft_config = self.draft_model_config.hf_config.dflash_config or {}
+        self.selector_top_k = int(draft_config.get("selector_top_k", 16))
+        self.p_min = float(os.getenv("DFLASH_P_MIN", draft_config.get("p_min", 0.0)))
+        self.n_min = int(os.getenv("DFLASH_N_MIN", draft_config.get("n_min", 0)))
         self._anchor_indices = (
             torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
             * self.num_query_per_req
@@ -150,6 +175,8 @@ class DFlash2Speculator(DFlashSpeculator):
             self.seeds,
             self.draft_tokens,
             self._selector_scores,
+            p_min=self.p_min,
+            n_min=self.n_min,
             num_steps=self.num_speculative_steps,
             top_k=self.selector_top_k,
             BLOCK_K=block_k,

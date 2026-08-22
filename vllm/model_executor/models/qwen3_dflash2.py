@@ -30,6 +30,9 @@ def _grouped_conv_fused_kernel(
     base_ptr,
     output_ptr,
     N: tl.int32,
+    stride_delta_n: tl.int32,
+    stride_delta_t: tl.int32,
+    stride_delta_g: tl.int32,
     num_groups: tl.constexpr,
     group_size: tl.constexpr,
     hidden_size: tl.constexpr,
@@ -51,9 +54,9 @@ def _grouped_conv_fused_kernel(
     base_0 = tl.load(base_ptr + base_idx_0).to(tl.float32)
     base_1 = tl.load(base_ptr + base_idx_1).to(tl.float32)
 
-    # Delta weights: [N, 2, num_groups]
-    delta_idx_0 = offs_n * (2 * num_groups) + 0 * num_groups + pid_g
-    delta_idx_1 = offs_n * (2 * num_groups) + 1 * num_groups + pid_g
+    # Delta weights: [N, taps, num_groups] with dynamic strides
+    delta_idx_0 = offs_n * stride_delta_n + 0 * stride_delta_t + pid_g * stride_delta_g
+    delta_idx_1 = offs_n * stride_delta_n + 1 * stride_delta_t + pid_g * stride_delta_g
 
     delta_0 = tl.load(delta_ptr + delta_idx_0, mask=mask_n, other=0.0).to(tl.float32)
     delta_1 = tl.load(delta_ptr + delta_idx_1, mask=mask_n, other=0.0).to(tl.float32)
@@ -105,6 +108,9 @@ def _grouped_conv(
             base,
             output,
             N=N,
+            stride_delta_n=delta.stride(0),
+            stride_delta_t=delta.stride(1),
+            stride_delta_g=delta.stride(2),
             num_groups=num_groups,
             group_size=group_size,
             hidden_size=hidden_size,
@@ -253,8 +259,8 @@ def _score_edges(
     unary_logits: torch.Tensor,
     hidden: torch.Tensor,
     anchor_token_ids: torch.Tensor,
-    top_k: int,
 ) -> torch.Tensor:
+    top_k = candidate_ids.shape[-1]
     successors = successor_table[candidate_ids]
     predecessor_ids = torch.cat(
         (
@@ -264,9 +270,12 @@ def _score_edges(
         dim=1,
     )
     predecessors = predecessor_table[predecessor_ids]
-    return unary_logits[:, :, None] + torch.einsum(
-        "blpr,blcr->blpc", predecessors * hidden[:, :, None], successors
-    )
+    # Fast batched GEMM: (B * L, K, R) x (B * L, R, K) -> (B * L, K, K)
+    B, L, K, R = predecessors.shape
+    cond = (predecessors * hidden.unsqueeze(2)).view(B * L, K, R)
+    succ_t = successors.view(B * L, K, R).transpose(1, 2)
+    scores = torch.bmm(cond, succ_t).view(B, L, K, K)
+    return unary_logits.unsqueeze(2) + scores
 
 
 @support_torch_compile
@@ -313,7 +322,6 @@ class CandidateSelector(nn.Module):
             unary_logits,
             hidden,
             anchor_token_ids,
-            self.top_k,
         )
 
 

@@ -737,7 +737,8 @@ def reduce_segments(
 
     # load and rescale segment exp sums
     segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
-    segm_expsum = segm_expsum * tl.exp(segm_max - overall_max)
+    segm_weight = tl.where(segm_max == float("-inf"), 0.0, tl.exp(segm_max - overall_max))
+    segm_expsum = segm_expsum * segm_weight
     overall_expsum = tl.sum(segm_expsum)
 
     # load, rescale, and add segment attention outputs
@@ -753,7 +754,8 @@ def reduce_segments(
         mask=segm_mask[:, None] & dim_mask[None, :],
         other=0.0,
     )
-    segm_output *= tl.exp(segm_max - overall_max)[:, None]
+    segm_weight_2d = segm_weight[:, None]
+    segm_output = tl.where(segm_weight_2d == 0.0, 0.0, segm_output * segm_weight_2d)
     acc_sum = tl.sum(segm_output, axis=0)
     # safely divide by overall_expsum, returning 0.0 if overall_expsum is 0
     acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
