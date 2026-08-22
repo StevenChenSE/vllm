@@ -42,17 +42,6 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
-// Paged prefill attention kernel for AMD RDNA3 (gfx1100). Replaces the
-// Triton context_attention_fwd path for chunked prefill with a hand-tuned
-// WMMA implementation (v1 small-qlen + v2 4-wave production path).
-// fp16/bf16, head_size == 128, causal only, no FP8 KV / alibi / SWA /
-// sinks / softcap. See csrc/rocm/paged_prefill_attn_rdna3.cu.
-void paged_prefill_attn_rdna3(
-    torch::Tensor& out, torch::Tensor q, torch::Tensor k_chunk,
-    torch::Tensor v_chunk, torch::Tensor k_cache, torch::Tensor v_cache,
-    torch::Tensor block_table, torch::Tensor cu_seqlens_q,
-    torch::Tensor seq_lens, double sm_scale, bool causal);
-
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,

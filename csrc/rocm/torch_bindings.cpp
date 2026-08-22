@@ -72,16 +72,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int top_k, int block_size_m, bool mul_topk_weight, "
       "int output_topk) -> ()");
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
-
-  // Paged prefill attention (WMMA, gfx1100). Drop-in replacement for the
-  // Triton chunked-prefill path; see csrc/rocm/paged_prefill_attn_rdna3.cu.
-  rocm_ops.def(
-      "paged_prefill_attn_rdna3(Tensor! out, Tensor q, Tensor k_chunk, "
-      "Tensor v_chunk, Tensor k_cache, Tensor v_cache, Tensor block_table, "
-      "Tensor cu_seqlens_q, Tensor seq_lens, float sm_scale, bool causal) "
-      "-> ()");
-  rocm_ops.impl("paged_prefill_attn_rdna3", torch::kCUDA,
-                &paged_prefill_attn_rdna3);
 #endif
 
   // Custom attention op

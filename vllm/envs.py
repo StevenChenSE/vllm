@@ -106,10 +106,6 @@ if TYPE_CHECKING:
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
-    VLLM_HOSTAR: bool = False
-    VLLM_HOSTAR_LIB: str | None = None
-    VLLM_HOSTAR_EAGER: bool = False
-    VLLM_HOSTAR_MAXELEMS: int = 1 << 21
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_MAX_N_SEQUENCES: int = 16384
@@ -1102,16 +1098,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH": lambda: bool(
         int(os.getenv("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "0"))
-    ),
-    "VLLM_HOSTAR": lambda: (
-        os.environ.get("VLLM_HOSTAR", "0").strip().lower() in ("1", "true")
-    ),
-    "VLLM_HOSTAR_LIB": lambda: os.getenv("VLLM_HOSTAR_LIB", None),
-    "VLLM_HOSTAR_EAGER": lambda: (
-        os.environ.get("VLLM_HOSTAR_EAGER", "0").strip().lower() in ("1", "true")
-    ),
-    "VLLM_HOSTAR_MAXELEMS": lambda: int(
-        os.getenv("VLLM_HOSTAR_MAXELEMS", str(1 << 21))
     ),
     # If the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN is set, it allows
     # the user to specify a max sequence length greater than
