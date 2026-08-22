@@ -661,7 +661,8 @@ class DFlashQwen3Model(nn.Module):
         if context_slot_mapping is None:
             return
 
-        # --- Per-layer cache insert ---
+        # --- Direct In-place Ring Buffer KV Cache fast-path ---
+        # If the attention layer holds a contiguous ring buffer, write directly without block table lookup
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
         per_layer = isinstance(context_slot_mapping, (list, tuple))
         for i in range(L):
