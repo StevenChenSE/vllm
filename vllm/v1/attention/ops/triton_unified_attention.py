@@ -422,7 +422,9 @@ def kernel_unified_attention(
         tile_mask = seq_offset < max_seq_prefix_len
 
         physical_block_idx = tl.load(
-            block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
+            block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE,
+            mask=tile_mask,
+            other=0,
         ).to(tl.int64)
 
         if USE_TD:
@@ -734,10 +736,14 @@ def reduce_segments(
     )
     segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
     overall_max = tl.max(segm_max)
+    overall_max_safe = tl.where(overall_max == float("-inf"), 0.0, overall_max)
+    segm_diff = tl.where(
+        segm_max == float("-inf"), -10000.0, segm_max - overall_max_safe
+    )
 
     # load and rescale segment exp sums
     segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
-    segm_weight = tl.where(segm_max == float("-inf"), 0.0, tl.exp(segm_max - overall_max))
+    segm_weight = tl.where(segm_max == float("-inf"), 0.0, tl.exp(segm_diff))
     segm_expsum = segm_expsum * segm_weight
     overall_expsum = tl.sum(segm_expsum)
 
@@ -757,8 +763,8 @@ def reduce_segments(
     segm_weight_2d = segm_weight[:, None]
     segm_output = tl.where(segm_weight_2d == 0.0, 0.0, segm_output * segm_weight_2d)
     acc_sum = tl.sum(segm_output, axis=0)
-    # safely divide by overall_expsum, returning 0.0 if overall_expsum is 0
-    acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
+    safe_expsum = tl.where(overall_expsum == 0.0, 1.0, overall_expsum)
+    acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / safe_expsum)
 
     if USE_FP8:
         acc = acc * tl.load(out_scale_inv)
@@ -931,25 +937,36 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
+    # Launch the 2D kernel if
+    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
+    # 2. The batch includes at least one prefill request, or
+    # 3. The number of sequences exceeds the configured threshold, or
+    # 4. Batch invariance is enabled
+    use_3d = not (
+        seq_threshold_3D is None
+        or num_par_softmax_segments is None
+        or softmax_segm_output is None
+        or softmax_segm_max is None
+        or softmax_segm_expsum is None
+        or q.shape[0] > seq_threshold_3D
+        or num_seqs > seq_threshold_3D
+        or is_batch_invariant
+    )
+
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     )
 
-    # RDNA3 prefill tile sizing (gfx1100, wave32). Three regimes:
+    # RDNA3 prefill tile sizing (gfx1100, wave32). Regimes for 2D prefill:
     #  - Short KV (≤1024):  BLOCK_M=32,  num_warps=2.  Small workload per
     #    block; fewer warps avoids register pressure and sync overhead.
-    #  - Medium KV (1025-8192): BLOCK_M=64, num_warps=4.  Doubles Q reuse
-    #    vs M32; 4 warps match the larger per-block workload.
-    #  - Long KV (>8192):  BLOCK_M=128, num_warps=8.  Quadruples Q reuse
-    #    (AI ≈ 64 FLOPs/byte); 8 warps hide HBM latency on deep loops.
-    _rdna3_prefill_tier = 0  # 0=default, 1=short, 2=medium, 3=long
-    if current_platform.is_rocm() and max_seqlen_q > 1:
+    #  - Medium/Long KV (>1024): BLOCK_M=64, num_warps=4.  Doubles Q reuse
+    #    vs M32; 4 warps match the larger per-block workload without VGPR overflow.
+    _rdna3_prefill_tier = 0  # 0=default, 1=short, 2=medium/long
+    if current_platform.is_rocm() and not use_3d and max_seqlen_q > 1:
         from vllm.platforms.rocm import on_gfx11
         if on_gfx11() and BLOCK_M == 16:
-            if max_seqlen_k > 8192:
-                BLOCK_M = 128
-                _rdna3_prefill_tier = 3
-            elif max_seqlen_k > 1024:
+            if max_seqlen_k > 1024:
                 BLOCK_M = 64
                 _rdna3_prefill_tier = 2
             else:
@@ -962,15 +979,13 @@ def unified_attention(
     launch_num_warps: int | None = None
     launch_num_stages: int | None = None
 
-    if _rdna3_prefill_tier == 3:
-        launch_num_warps = 8
-        launch_num_stages = 1
-    elif _rdna3_prefill_tier == 2:
-        launch_num_warps = 4
-        launch_num_stages = 1
-    elif _rdna3_prefill_tier == 1:
-        launch_num_warps = 2
-        launch_num_stages = 1
+    if not use_3d and _rdna3_prefill_tier > 0:
+        if _rdna3_prefill_tier == 2:
+            launch_num_warps = 4
+            launch_num_stages = 1
+        elif _rdna3_prefill_tier == 1:
+            launch_num_warps = 2
+            launch_num_stages = 1
 
     # head_size 256 with many query rows per sequence (e.g. diffusion-gemma
     # bidirectional canvas passes) is prefill-shaped, but the decode-oriented
@@ -1066,22 +1081,6 @@ def unified_attention(
             f"USE_TD_QO requires contiguous output heads "
             f"(out.stride(1) = {out.stride(1)} != head_size = {head_size})."
         )
-
-    # Launch the 2D kernel if
-    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. The batch includes at least one prefill request, or
-    # 3. The number of sequences exceeds the configured threshold, or
-    # 4. Batch invariance is enabled
-    use_3d = not (
-        seq_threshold_3D is None
-        or num_par_softmax_segments is None
-        or softmax_segm_output is None
-        or softmax_segm_max is None
-        or softmax_segm_expsum is None
-        or q.shape[0] > seq_threshold_3D
-        or num_seqs > seq_threshold_3D
-        or is_batch_invariant
-    )
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
