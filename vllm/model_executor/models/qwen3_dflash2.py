@@ -235,20 +235,22 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Fused Attention Branch
         if residual is None:
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            normed_h = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            normed_h, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states, coefficients = self.attention_conv.prepare(hidden_states)
-        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        hidden_states = self.attention_conv.finish(hidden_states, coefficients)
+        conv_h, coefficients = self.attention_conv.prepare(normed_h)
+        attn_out = self.self_attn(positions=positions, hidden_states=conv_h)
+        hidden_states = self.attention_conv.finish(attn_out, coefficients)
 
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states, coefficients = self.mlp_conv.prepare(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = self.mlp_conv.finish(hidden_states, coefficients)
+        # Fused MLP Branch
+        normed_h, residual = self.post_attention_layernorm(hidden_states, residual)
+        conv_mlp_in, mlp_coeff = self.mlp_conv.prepare(normed_h)
+        mlp_out = self.mlp(conv_mlp_in)
+        hidden_states = self.mlp_conv.finish(mlp_out, mlp_coeff)
         return hidden_states, residual
 
 
