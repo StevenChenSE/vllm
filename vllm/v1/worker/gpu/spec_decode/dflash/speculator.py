@@ -37,7 +37,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         super().__init__(vllm_config, device)
 
         self.hidden_states = torch.zeros(
-            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
+            self.max_num_tokens, self.hidden_size, dtype=self.draft_model_config.dtype, device=device
         )
 
         # Multimodal inputs not currently supported.

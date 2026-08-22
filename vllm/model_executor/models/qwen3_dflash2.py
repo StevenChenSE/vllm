@@ -120,6 +120,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             quant_config=quant_config,
             prefix=prefix,
         )
+        self.layer_idx = layer_idx
         draft_config = config.dflash_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
@@ -129,7 +130,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             group_size=int(draft_config["conv_group_size"]),
             # Query tokens per request: the bonus token plus the mask tokens.
             block_size=1 + speculative_config.num_speculative_tokens,
-            params_dtype=vllm_config.model_config.dtype,
+            params_dtype=speculative_config.draft_model_config.dtype,
         )
         self.attention_conv = DFlashGroupedConv(
             **conv_args, prefix=maybe_prefix(prefix, "attention_conv")
@@ -258,7 +259,7 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
                 vocab_size=self.config.vocab_size,
                 rank=int(draft_config["selector_rank"]),
                 top_k=int(draft_config["selector_top_k"]),
-                params_dtype=vllm_config.model_config.dtype,
+                params_dtype=vllm_config.speculative_config.draft_model_config.dtype,
                 prefix=maybe_prefix(prefix, "candidate_selector"),
             )
 

@@ -19,6 +19,7 @@ instead of embedding feature-specific logic directly.
 
 import functools
 import gc
+import os
 import time
 from copy import deepcopy
 from typing import Any, NamedTuple
@@ -1631,6 +1632,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.step_timing.forward_start()
 
         # Run model.
+        do_prof = os.environ.get("VLLM_PROFILE_STEP") == "1"
+        if do_prof:
+            torch.cuda.synchronize()
+            t_fwd_start = time.perf_counter()
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
@@ -1669,6 +1674,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
+
+        if do_prof:
+            torch.cuda.synchronize()
+            self._last_fwd_time_ms = (time.perf_counter() - t_fwd_start) * 1000.0
+            self._last_cg_mode = str(batch_desc.cg_mode)
+            self._last_num_toks = num_toks
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
@@ -1830,6 +1841,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             with use_workspace_lane(self._draft_workspace_lane):
+                do_prof = os.environ.get("VLLM_PROFILE_STEP") == "1"
+                if do_prof:
+                    torch.cuda.synchronize()
+                    t_prop_start = time.perf_counter()
                 draft_tokens = self.speculator.propose(
                     input_batch,
                     attn_metadata,
@@ -1844,6 +1859,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.sampler.sampling_states.seeds.gpu,
                     mm_inputs=mm_inputs,
                 )
+                if do_prof:
+                    torch.cuda.synchronize()
+                    t_prop_ms = (time.perf_counter() - t_prop_start) * 1000.0
+                    fwd_ms = getattr(self, "_last_fwd_time_ms", 0.0)
+                    cg_mode = getattr(self, "_last_cg_mode", "UNKNOWN")
+                    num_toks = getattr(self, "_last_num_toks", 0)
+                    print(
+                        f"[PROFILE] Target_Fwd={fwd_ms:6.2f}ms ({cg_mode}, toks={num_toks:2d}) | "
+                        f"Drafter_Propose={t_prop_ms:6.2f}ms | "
+                        f"Sampled={num_sampled.tolist() if hasattr(num_sampled, 'tolist') else num_sampled} "
+                        f"Rejected={num_rejected.tolist() if hasattr(num_rejected, 'tolist') else num_rejected}",
+                        flush=True
+                    )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(

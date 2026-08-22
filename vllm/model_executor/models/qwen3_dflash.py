@@ -430,9 +430,10 @@ class DFlashQwen3Model(nn.Module):
         # at that slot id. Some checkpoints (XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash) ship
         # with a separate mask embedding tensor to use instead. When present, we load it
         # and substitute it for embed_tokens[mask_token_id] when computing embeddings.
+        draft_dtype = vllm_config.speculative_config.draft_model_config.dtype
         self.mask_token_id = drafter_config.get("mask_token_id")
         self.mask_embedding = nn.Parameter(
-            torch.zeros(self.config.hidden_size, dtype=vllm_config.model_config.dtype),
+            torch.zeros(self.config.hidden_size, dtype=draft_dtype),
             requires_grad=False,
         )
         self.has_separate_mask_embedding = False
@@ -457,7 +458,7 @@ class DFlashQwen3Model(nn.Module):
                 ),
                 output_size=self.config.hidden_size,
                 bias=False,
-                params_dtype=vllm_config.model_config.dtype,
+                params_dtype=draft_dtype,
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "fc"),
                 return_bias=False,
@@ -613,6 +614,8 @@ class DFlashQwen3Model(nn.Module):
             self._build_fused_kv_buffers()
 
         num_ctx = context_states.shape[0]
+        if context_states.dtype != self._hidden_norm_weight.dtype:
+            context_states = context_states.to(dtype=self._hidden_norm_weight.dtype)
         L = self._num_attn_layers
         kv = self._kv_size
         hd = self._head_dim
@@ -670,6 +673,10 @@ class DFlashQwen3Model(nn.Module):
             input_embeds = self.embed_input_ids(input_ids)
 
         hidden_states = input_embeds
+        if hasattr(self, "layers") and len(self.layers) > 0:
+            first_layer_dtype = getattr(self.layers[0], "params_dtype", None) or getattr(self.layers[0].input_layernorm.weight, "dtype", None)
+            if first_layer_dtype is not None and hidden_states.dtype != first_layer_dtype:
+                hidden_states = hidden_states.to(dtype=first_layer_dtype)
 
         residual = None
         for layer in self.layers:
@@ -797,6 +804,8 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     ) -> torch.Tensor:
         if not self.model.use_aux_hidden_state:
             return hidden_states
+        if hasattr(self.model, "fc") and hasattr(self.model.fc, "weight") and hidden_states.dtype != self.model.fc.weight.dtype:
+            hidden_states = hidden_states.to(dtype=self.model.fc.weight.dtype)
         needs_squeeze = hidden_states.dim() == 1
         if needs_squeeze:
             hidden_states = hidden_states.unsqueeze(0)
