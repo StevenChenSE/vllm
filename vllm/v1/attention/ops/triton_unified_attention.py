@@ -316,7 +316,7 @@ def kernel_unified_attention(
         query_start_len_ptr, seq_lens_ptr, q_block_global_idx, num_seqs, BLOCK_Q
     )
 
-    if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
+    if q_block_local_idx < 0 or q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
         return
 
     if IS_3D:

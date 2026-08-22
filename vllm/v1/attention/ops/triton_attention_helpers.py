@@ -66,6 +66,7 @@ def resolve_seq_and_query_len(
     seq_idx = find_seq_idx(
         query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
     )
+    seq_idx = tl.maximum(0, tl.minimum(num_seqs - 1, seq_idx))
     q_block_start_idx = tl.load(query_start_len_ptr + seq_idx) // BLOCK_Q + seq_idx
     q_block_local_idx = q_block_global_idx - q_block_start_idx
     cur_start = tl.load(query_start_len_ptr + seq_idx)
