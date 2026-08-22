@@ -5,6 +5,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+import triton
+import triton.language as tl
+
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -20,6 +23,67 @@ from .qwen3_dflash import (
 from .utils import maybe_prefix
 
 
+@triton.jit
+def _grouped_conv_fused_kernel(
+    hidden_ptr,
+    delta_ptr,
+    base_ptr,
+    output_ptr,
+    N: tl.int32,
+    num_groups: tl.constexpr,
+    group_size: tl.constexpr,
+    hidden_size: tl.constexpr,
+    block_size: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    pid_g = tl.program_id(1)
+
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    mask_n = offs_n < N
+
+    offs_e = tl.arange(0, group_size)
+
+    # Base weights for tap 0 and tap 1 for this group
+    base_idx_0 = 0 * hidden_size + pid_g * group_size + offs_e
+    base_idx_1 = 1 * hidden_size + pid_g * group_size + offs_e
+
+    base_0 = tl.load(base_ptr + base_idx_0).to(tl.float32)
+    base_1 = tl.load(base_ptr + base_idx_1).to(tl.float32)
+
+    # Delta weights: [N, 2, num_groups]
+    delta_idx_0 = offs_n * (2 * num_groups) + 0 * num_groups + pid_g
+    delta_idx_1 = offs_n * (2 * num_groups) + 1 * num_groups + pid_g
+
+    delta_0 = tl.load(delta_ptr + delta_idx_0, mask=mask_n, other=0.0).to(tl.float32)
+    delta_1 = tl.load(delta_ptr + delta_idx_1, mask=mask_n, other=0.0).to(tl.float32)
+
+    coeff_0 = base_0[None, :] + delta_0[:, None]
+    coeff_1 = base_1[None, :] + delta_1[:, None]
+
+    # Current hidden states: [BLOCK_N, group_size]
+    h_idx_0 = offs_n[:, None] * hidden_size + (pid_g * group_size + offs_e[None, :])
+    h_0 = tl.load(hidden_ptr + h_idx_0, mask=mask_n[:, None], other=0.0).to(tl.float32)
+
+    out = coeff_0 * h_0
+
+    # Tap 1 (shifted by 1 if pos % block_size >= 1)
+    pos = offs_n % block_size
+    valid_tap1 = mask_n & (pos >= 1)
+
+    prev_n = tl.maximum(offs_n - 1, 0)
+    h_idx_1 = prev_n[:, None] * hidden_size + (pid_g * group_size + offs_e[None, :])
+    h_1 = tl.load(hidden_ptr + h_idx_1, mask=valid_tap1[:, None], other=0.0).to(tl.float32)
+
+    out += coeff_1 * h_1
+
+    tl.store(
+        output_ptr + h_idx_0,
+        out.to(hidden_ptr.dtype.element_ty),
+        mask=mask_n[:, None],
+    )
+
+
 def _grouped_conv(
     hidden_states: torch.Tensor,
     delta: torch.Tensor,
@@ -29,6 +93,26 @@ def _grouped_conv(
     group_size: int,
     taps: int,
 ) -> torch.Tensor:
+    if taps == 2 and hidden_states.is_cuda and hidden_states.is_contiguous():
+        N = hidden_states.shape[0]
+        hidden_size = num_groups * group_size
+        output = torch.empty_like(hidden_states)
+        BLOCK_N = 8
+        grid = (triton.cdiv(N, BLOCK_N), num_groups)
+        _grouped_conv_fused_kernel[grid](
+            hidden_states,
+            delta,
+            base,
+            output,
+            N=N,
+            num_groups=num_groups,
+            group_size=group_size,
+            hidden_size=hidden_size,
+            block_size=block_size,
+            BLOCK_N=BLOCK_N,
+        )
+        return output
+
     blocks = hidden_states.unflatten(-1, (num_groups, group_size))
     coefficients = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
     output = coefficients[:, 0] * blocks

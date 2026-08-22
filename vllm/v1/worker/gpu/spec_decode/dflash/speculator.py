@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -422,6 +424,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         # because the context shape varies per step. During dummy runs the block tables
         # are placeholders, so we skip the cache write to avoid clobbering real entries.
         # Each layer uses the context slots of its own kv-cache group.
+        do_dflash_prof = os.environ.get("VLLM_PROFILE_DFLASH") == "1"
+        if do_dflash_prof:
+            torch.cuda.synchronize()
+            t_kv_start = time.perf_counter()
         if dummy_run:
             context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
         elif self._layer_group_idx is not None:
@@ -436,6 +442,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.context_positions[:num_target_tokens],
             context_slots,
         )
+        if do_dflash_prof:
+            torch.cuda.synchronize()
+            t_kv_ms = (time.perf_counter() - t_kv_start) * 1000.0
+            t_cg_start = time.perf_counter()
 
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
@@ -482,6 +492,10 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
+        if do_dflash_prof:
+            torch.cuda.synchronize()
+            t_cg_ms = (time.perf_counter() - t_cg_start) * 1000.0
+            print(f"[DFLASH_DETAILED] precompute_kv={t_kv_ms:5.2f}ms | cudagraph_replay={t_cg_ms:5.2f}ms", flush=True)
 
         return self.draft_tokens[:num_reqs]
 
