@@ -35,10 +35,29 @@ DFlash2 drafter 修复、ROCm 内核优化，以及调优过的双 7900 XTX 服�
 
 ---
 
+## 硬件与软件环境
+
+| 项目 | 配置 |
+|---|---|
+| 显卡 | 2× AMD Radeon RX 7900 XTX，各 24 GiB，gfx1100，TP=2 |
+| ROCm | **7.14**（HIP 7.14.60850） |
+| GPU 驱动 | **amdgpu 内核模块 3.2.340**（kernel 6.17.0-35-generic，Ubuntu 24.04，`amdgpu-install` 30.30.4） |
+| PyTorch | 2.11.0+git，ROCm wheel（`torch.version.hip = 7.2.53211`） |
+| 系统 | Linux（启用 ROCm），见上游 [ROCm 安装指南](https://docs.vllm.ai/en/latest/getting_started/installation/gpu.html) |
+| ROCm 环境变量 | `HSA_OVERRIDE_GFX_VERSION=11.0.0`、`HSA_ENABLE_IPC_MODE_LEGACY=0`、`HSA_FORCE_FINE_GRAIN_AMDGPU=1`、`FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`、`GCN_ARCH_NAME=gfx1100`、`VLLM_ROCM_USE_AITER=1` |
+| 目标模型 | Qwen3.8-27B（W4A16 GPTQ，hidden 5120），FP8 KV cache |
+| DFlash2 drafter | 5 层 `Qwen3.8-27B-DFlash2-bf16`，`num_speculative_tokens=7`，sliding window 2048 |
+
+> **注意**：`HSA_ENABLE_IPC_MODE_LEGACY=0` 与 `HSA_FORCE_FINE_GRAIN_AMDGPU=1` 对 TP=2 稳定性
+> **必需** —— 去掉后第一个请求即触发 `ProcessGroupNCCL` 崩溃。它们不出现在 vLLM 源码中，
+> 但由 HIP 运行时读取。
+
+---
+
 ## 从源码构建
 
 ```bash
-# 前置：ROCm >= 6.x + 匹配的 PyTorch ROCm wheel，CMake >= 3.26，HIP 工具链。
+# 前置：上述 ROCm/驱动栈 + 匹配的 PyTorch ROCm wheel，CMake >= 3.26，HIP 工具链。
 cd vllm
 pip install -e .          # 通过 torch.version.hip 自动识别 ROCm（VLLM_TARGET_DEVICE=rocm）
 python -c "import vllm; print(vllm.__version__)"   # 验证 editable 安装
@@ -49,22 +68,6 @@ python -c "import vllm; print(vllm.__version__)"   # 验证 editable 安装
   通过 `GCN_ARCH_NAME` 定位 gfx1100）。
 - 本文档其余部分假定已完成可用的 editable 构建；启动配方使用本仓库的 `serve-bootstrap.py`
   包装，但直接 `vllm serve` 效果相同。
-
----
-
-## 硬件与软件环境
-
-| 项目 | 配置 |
-|---|---|
-| 显卡 | 2× AMD Radeon RX 7900 XTX，各 24 GiB，gfx1100，TP=2 |
-| 系统 | Linux（启用 ROCm），见上游 [ROCm 安装指南](https://docs.vllm.ai/en/latest/getting_started/installation/gpu.html) |
-| ROCm 环境变量 | `HSA_OVERRIDE_GFX_VERSION=11.0.0`、`HSA_ENABLE_IPC_MODE_LEGACY=0`、`HSA_FORCE_FINE_GRAIN_AMDGPU=1`、`FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`、`GCN_ARCH_NAME=gfx1100`、`VLLM_ROCM_USE_AITER=1` |
-| 目标模型 | Qwen3.8-27B（W4A16 GPTQ，hidden 5120），FP8 KV cache |
-| DFlash2 drafter | 5 层 `Qwen3.8-27B-DFlash2-bf16`，`num_speculative_tokens=7`，sliding window 2048 |
-
-> **注意**：`HSA_ENABLE_IPC_MODE_LEGACY=0` 与 `HSA_FORCE_FINE_GRAIN_AMDGPU=1` 对 TP=2 稳定性
-> **必需** —— 去掉后第一个请求即触发 `ProcessGroupNCCL` 崩溃。它们不出现在 vLLM 源码中，
-> 但由 HIP 运行时读取。
 
 ---
 

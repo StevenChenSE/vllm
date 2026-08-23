@@ -38,10 +38,29 @@ This branch (`feat/dflash-perf-opt`) carries RDNA3-specific improvements on top 
 
 ---
 
+## Hardware & software environment
+
+| Item | Value |
+|---|---|
+| GPUs | 2× AMD Radeon RX 7900 XTX, 24 GiB each, gfx1100, TP=2 |
+| ROCm | **7.14** (HIP 7.14.60850) |
+| GPU driver | **amdgpu kernel module 3.2.340** (kernel 6.17.0-35-generic, Ubuntu 24.04, `amdgpu-install` 30.30.4) |
+| PyTorch | 2.11.0+git, ROCm wheel (`torch.version.hip = 7.2.53211`) |
+| OS | Linux (ROCm-enabled), see upstream [ROCm install guide](https://docs.vllm.ai/en/latest/getting_started/installation/gpu.html) |
+| ROCm env | `HSA_OVERRIDE_GFX_VERSION=11.0.0`, `HSA_ENABLE_IPC_MODE_LEGACY=0`, `HSA_FORCE_FINE_GRAIN_AMDGPU=1`, `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`, `GCN_ARCH_NAME=gfx1100`, `VLLM_ROCM_USE_AITER=1` |
+| Target model | Qwen3.8-27B (W4A16 GPTQ, hidden 5120), FP8 KV cache |
+| DFlash2 drafter | 5-layer `Qwen3.8-27B-DFlash2-bf16`, `num_speculative_tokens=7`, sliding window 2048 |
+
+> **Note**: `HSA_ENABLE_IPC_MODE_LEGACY=0` and `HSA_FORCE_FINE_GRAIN_AMDGPU=1` are **required**
+> for TP=2 stability — dropping them caused a `ProcessGroupNCCL` crash on the first request.
+> They are not referenced in vLLM source but are read by the HIP runtime.
+
+---
+
 ## Building from source
 
 ```bash
-# Prerequisites: ROCm >= 6.x with a matching PyTorch ROCm wheel, CMake >= 3.26, HIP toolchain.
+# Prerequisites: the ROCm/driver stack above, a matching PyTorch ROCm wheel, CMake >= 3.26, HIP toolchain.
 cd vllm
 pip install -e .          # auto-detects ROCm via torch.version.hip (VLLM_TARGET_DEVICE=rocm)
 python -c "import vllm; print(vllm.__version__)"   # verify the editable install
@@ -52,22 +71,6 @@ python -c "import vllm; print(vllm.__version__)"   # verify the editable install
   is only needed at runtime (and for Triton JIT targeting gfx1100 via `GCN_ARCH_NAME`).
 - A working editable build is what the rest of this document assumes; the launch recipes use the
   repo's `serve-bootstrap.py` wrapper, but plain `vllm serve` works identically.
-
----
-
-## Hardware & software environment
-
-| Item | Value |
-|---|---|
-| GPUs | 2× AMD Radeon RX 7900 XTX, 24 GiB each, gfx1100, TP=2 |
-| OS | Linux (ROCm-enabled), see upstream [ROCm install guide](https://docs.vllm.ai/en/latest/getting_started/installation/gpu.html) |
-| ROCm env | `HSA_OVERRIDE_GFX_VERSION=11.0.0`, `HSA_ENABLE_IPC_MODE_LEGACY=0`, `HSA_FORCE_FINE_GRAIN_AMDGPU=1`, `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`, `GCN_ARCH_NAME=gfx1100`, `VLLM_ROCM_USE_AITER=1` |
-| Target model | Qwen3.8-27B (W4A16 GPTQ, hidden 5120), FP8 KV cache |
-| DFlash2 drafter | 5-layer `Qwen3.8-27B-DFlash2-bf16`, `num_speculative_tokens=7`, sliding window 2048 |
-
-> **Note**: `HSA_ENABLE_IPC_MODE_LEGACY=0` and `HSA_FORCE_FINE_GRAIN_AMDGPU=1` are **required**
-> for TP=2 stability — dropping them caused a `ProcessGroupNCCL` crash on the first request.
-> They are not referenced in vLLM source but are read by the HIP runtime.
 
 ---
 
