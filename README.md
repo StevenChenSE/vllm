@@ -179,6 +179,34 @@ stock. llama.cpp is a tg=128 run from the same benchmark series (IMPROVEMENTS.md
 
 ---
 
+## Key performance claims
+
+**vs stock vLLM (early upstream numbers)** — decode **+50–80%** across 0–16k context; prefill
+holds up at depth (DFlash2 1662 vs stock 1131 tok/s @8k) while stock prefill decays **-53%**
+by 16k (1773→838).
+
+**vs llama.cpp (single-stream, c1)**:
+- **Prefill 80–125% faster**: DFlash2 1447–1805 vs llama.cpp 803–929 tok/s across 0–16k
+  (MTP similar, 1449–1948).
+- **Decode 17–48% faster**: DFlash2 93.1 vs 63.7 @d0, 79.8 vs 65.6 @8k, 69.1 vs 58.9 @16k;
+  MTP 94.3 vs 63.7 @d0.
+- **llama.cpp only wins per-request decode under concurrency** (c2/c4); at 32k/64k the
+  numbers are vLLM-only (llama.cpp not measured in this series).
+- **Correctness is identical**: GSM8K + MATH-500 100% on all four engines.
+
+**Math reasoning decode @ depth 0** (GSM8K + MATH-500, greedy, 4 problems, 100% accuracy):
+
+| engine | avg decode |
+| :--- | :---: |
+| vLLM Baseline (no spec) | 56.3 tok/s |
+| **vLLM DFlash2 (K=7)** | **142.3 tok/s (2.53×)** |
+| vLLM MTP (K=3) | 130.7 tok/s (2.32×) |
+| llama.cpp (Q6_K_XL, MTP) | 87.5 tok/s (1.55×) |
+
+(DFlash2 row measured in eager mode; full table in `IMPROVEMENTS.md` §9.2.)
+
+---
+
 ## Key findings & gotchas
 
 1. **`p_min` early-stop helps short context, hurts long context** — `DFLASH_P_MIN=0.3` gains

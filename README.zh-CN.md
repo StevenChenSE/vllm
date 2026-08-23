@@ -173,6 +173,34 @@ JartX 内核优化影响，用它代表 "stock" 会虚高）；stock 未测 32k/
 
 ---
 
+## 关键性能主张
+
+**对比 stock vLLM（早期上游数字）** — 0–16k 全深度 decode **+50–80%**；prefill 在深度下
+保持（8k：DFlash2 1662 vs stock 1131 tok/s），而 stock 的 prefill 到 16k 衰减 **-53%**
+（1773→838）。
+
+**对比 llama.cpp（单流 c1）**：
+- **Prefill 快 80–125%**：0–16k 深度 DFlash2 1447–1805 vs llama.cpp 803–929 tok/s
+  （MTP 相近，1449–1948）。
+- **Decode 快 17–48%**：DFlash2 93.1 vs 63.7 @d0、79.8 vs 65.6 @8k、69.1 vs 58.9 @16k；
+  MTP 94.3 vs 63.7 @d0。
+- **llama.cpp 仅在并发（c2/c4）下单请求 decode 反超**；32k/64k 数据只有 vLLM 有
+  （本系列 llama.cpp 未测）。
+- **正确性完全一致**：四款引擎 GSM8K + MATH-500 均 100%。
+
+**数学推理 decode（depth 0）**（GSM8K + MATH-500，greedy，4 题，正确率 100%）：
+
+| 引擎 | 平均 decode |
+| :--- | :---: |
+| vLLM Baseline（无投机） | 56.3 tok/s |
+| **vLLM DFlash2 (K=7)** | **142.3 tok/s（2.53×）** |
+| vLLM MTP (K=3) | 130.7 tok/s（2.32×） |
+| llama.cpp (Q6_K_XL, MTP) | 87.5 tok/s（1.55×） |
+
+（DFlash2 行为 eager 模式实测；完整表见 `IMPROVEMENTS.md` §9.2。）
+
+---
+
 ## 关键发现与坑
 
 1. **`p_min` 提前截断：短上下文有益、长上下文有害** —— `DFLASH_P_MIN=0.3` 在 depth 0
