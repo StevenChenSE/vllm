@@ -40,14 +40,15 @@ This branch (`feat/dflash-perf-opt`) carries RDNA3-specific improvements on top 
 
 ---
 
-## Preparing the model checkpoint / 模型准备
+## Preparing the model checkpoint
 
 The target uses a patched local checkpoint `qwen3.8-27b-mtp-fixed`, derived from
-`Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`:
+[`Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`](https://huggingface.co/Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ)
+(source `config.json` verified against the live HF repo):
 
 1. The stock repo stores all 15 MTP tensors as plain **BF16** in
    `model_extra_tensors.safetensors`, but its `quantization_config.dynamic` declares
-   **positive** rules `"+:.*mtp.*"` (4-bit, group 64).
+   **positive** rules `"+:.*mtp.*"` and `"+:.*mtp\.fc.*"` (4-bit, group 64).
 2. vLLM's GPTQ loader trusts that config, builds MTP layers with quantized params, and
    weight loading fails (`no module or parameter named 'layers.0.mlp.down_proj.weight'`).
 3. **Patch**: replace those `"+:"` rules with a single `"-:.*mtp.*"` exclusion in
@@ -57,8 +58,9 @@ The target uses a patched local checkpoint `qwen3.8-27b-mtp-fixed`, derived from
    [#47828](https://github.com/vllm-project/vllm/pull/47828).
 
 The patched `config.json` ends up with 97 negative rules and zero positive rules
-(verified: `"mtp"` appears only as `-:.*mtp.*`). DFlash2 uses the same checkpoint as the
-target; the DFlash2 drafter itself is a separate `Qwen3.8-27B-DFlash2-bf16` checkpoint.
+(verified against the local `qwen3.8-27b-mtp-fixed/config.json`: `"mtp"` appears only as
+`-:.*mtp.*`). DFlash2 uses the same checkpoint as the target; the DFlash2 drafter itself
+is a separate `Qwen3.8-27B-DFlash2-bf16` checkpoint.
 
 ---
 

@@ -43,10 +43,12 @@ DFlash2 drafter 修复、ROCm 内核优化，以及调优过的双 7900 XTX 服�
 ## 如何准备 qwen3.8-27b-mtp-fixed（模型准备）
 
 目标模型使用打过补丁的本地 checkpoint `qwen3.8-27b-mtp-fixed`，源自
-`Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`：
+[`Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`](https://huggingface.co/Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ)
+（源 `config.json` 已对照 HF 线上仓库核实）：
 
 1. 原仓库把全部 15 个 MTP tensor 以纯 **BF16** 存放在 `model_extra_tensors.safetensors` 中，
-   但其 `quantization_config.dynamic` 声明了**正规则** `"+:.*mtp.*"`（4-bit，group 64）。
+   但其 `quantization_config.dynamic` 声明了**正规则** `"+:.*mtp.*"` 与 `"+:.*mtp\.fc.*"`
+   （4-bit，group 64）。
 2. vLLM 的 GPTQ loader 信任该配置，按量化参数构建 MTP 层，权重加载失败
    （`no module or parameter named 'layers.0.mlp.down_proj.weight'`）。
 3. **补丁**：把 `config.json` 中 `quantization_config.dynamic` 里的 `"+:"` 规则替换为一条
@@ -54,9 +56,10 @@ DFlash2 drafter 修复、ROCm 内核优化，以及调优过的双 7900 XTX 服�
    BF16 权重原样加载。上游参考：[vllm-project/vllm#48816](https://github.com/vllm-project/vllm/pull/48816)、
    [#47828](https://github.com/vllm-project/vllm/pull/47828)。
 
-补丁后的 `config.json` 共 97 条 negative 规则、0 条 positive 规则（已验证：`"mtp"` 仅以
-`-:.*mtp.*` 形式出现）。DFlash2 以同一 checkpoint 作为目标模型；DFlash2 drafter 本身是
-独立的 `Qwen3.8-27B-DFlash2-bf16` checkpoint。
+补丁后的 `config.json` 共 97 条 negative 规则、0 条 positive 规则（已对照本地
+`qwen3.8-27b-mtp-fixed/config.json` 核实：`"mtp"` 仅以 `-:.*mtp.*` 形式出现）。DFlash2 以
+同一 checkpoint 作为目标模型；DFlash2 drafter 本身是独立的
+`Qwen3.8-27B-DFlash2-bf16` checkpoint。
 
 ---
 
