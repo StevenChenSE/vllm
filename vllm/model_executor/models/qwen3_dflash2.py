@@ -97,6 +97,10 @@ def _grouped_conv(
     taps: int,
 ) -> torch.Tensor:
     if taps == 2 and hidden_states.is_cuda and hidden_states.is_contiguous():
+        if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "grouped_conv_fused_hip"):
+            return torch.ops._rocm_C.grouped_conv_fused_hip(
+                hidden_states, delta, base, block_size, num_groups, group_size
+            )
         N = hidden_states.shape[0]
         hidden_size = num_groups * group_size
         output = torch.empty_like(hidden_states)

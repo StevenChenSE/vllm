@@ -1,24 +1,9 @@
+#include "ops.h"
 #include "core/registration.h"
-#include "rocm/ops.h"
 
-// Note on op signatures:
-// The X_meta signatures are for the meta functions corresponding to op X.
-// They must be kept in sync with the signature for X. Generally, only
-// functions that return Tensors require a meta function.
-//
-// See the following links for detailed docs on op registration and function
-// schemas.
-// https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit#heading=h.ptttacy8y1u9
-// https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
-
-TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
-  // vLLM custom ops for rocm
-
-// skinny_gemms.cu (LLMM1/wvSplitK/wvSplitKrc/wvSplitKQ) is excluded on gfx1250
-// (gfx9/gfx11 ISA, unsupported there); skip these registrations to avoid
-// undefined symbols. vLLM uses default/Triton GEMM for these ops on gfx1250.
+TORCH_LIBRARY_EXPAND(_rocm_C, rocm_ops) {
 #ifndef VLLM_SKIP_SKINNY_GEMMS
-  // Custom gemm op for matrix-vector multiplication
+  // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
       "LLMM1(Tensor in_a, Tensor in_b, int rows_per_block) -> "
       "Tensor");
@@ -30,12 +15,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor");
   rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
 
-  // W4A16 grouped skinny GEMM: packed int4 weights, per-group scales,
-  // optional zero points for asymmetric quantization
+  // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
-      "wvSplitK_int4_g(Tensor in_a, Tensor in_b, Tensor in_scale, "
-      "Tensor? in_zero_points, Tensor? in_bias, int CuCount, "
-      "int group_size) -> Tensor");
+      "wvSplitK_int4_g(Tensor in_a, Tensor in_b, Tensor in_scale, Tensor? "
+      "in_zero_points, Tensor? in_bias, int CuCount, int group_size) -> "
+      "Tensor");
   rocm_ops.impl("wvSplitK_int4_g", torch::kCUDA, &wvSplitK_int4_g);
 
   // Custom gemm op for skinny matrix-matrix multiplication
@@ -73,6 +57,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int output_topk) -> ()");
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
 #endif
+
+  // DFlash2 1D Grouped Conv Fused Kernel
+  rocm_ops.def(
+      "grouped_conv_fused_hip(Tensor hidden_states, Tensor delta, Tensor base, "
+      "int block_size, int num_groups, int group_size) -> Tensor");
+  rocm_ops.impl("grouped_conv_fused_hip", torch::kCUDA, &grouped_conv_fused_hip);
+
+  // Split-KV reduce_segments Kernel
+  rocm_ops.def(
+      "reduce_segments_hip(Tensor! output, Tensor segm_output, Tensor segm_max, "
+      "Tensor segm_expsum, Tensor seq_lens, Tensor query_start_len, "
+      "int num_seqs, int num_query_heads, int head_size, int head_size_padded, int max_num_segments, int tile_size) -> ()");
+  rocm_ops.impl("reduce_segments_hip", torch::kCUDA, &reduce_segments_hip);
 
   // Custom attention op
   // Compute the attention between an input query and the cached

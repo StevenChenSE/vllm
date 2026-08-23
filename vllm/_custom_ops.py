@@ -2241,6 +2241,71 @@ def wvSplitKQ(
     return out
 
 
+def grouped_conv_fused_hip(
+    hidden_states: torch.Tensor,
+    delta: torch.Tensor,
+    base: torch.Tensor,
+    block_size: int,
+    num_groups: int,
+    group_size: int,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.grouped_conv_fused_hip(
+        hidden_states, delta, base, block_size, num_groups, group_size
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "grouped_conv_fused_hip"):
+    @register_fake("_rocm_C::grouped_conv_fused_hip")
+    def _grouped_conv_fused_hip_fake(
+        hidden_states: torch.Tensor,
+        delta: torch.Tensor,
+        base: torch.Tensor,
+        block_size: int,
+        num_groups: int,
+        group_size: int,
+    ) -> torch.Tensor:
+        return torch.empty_like(hidden_states)
+
+
+def reduce_segments_hip(
+    output: torch.Tensor,
+    segm_output: torch.Tensor,
+    segm_max: torch.Tensor,
+    segm_expsum: torch.Tensor,
+    seq_lens: torch.Tensor,
+    query_start_len: torch.Tensor,
+    num_seqs: int,
+    num_query_heads: int,
+    head_size: int,
+    head_size_padded: int,
+    max_num_segments: int,
+    tile_size: int,
+) -> None:
+    torch.ops._rocm_C.reduce_segments_hip(
+        output, segm_output, segm_max, segm_expsum, seq_lens, query_start_len,
+        num_seqs, num_query_heads, head_size, head_size_padded, max_num_segments, tile_size
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "reduce_segments_hip"):
+    @register_fake("_rocm_C::reduce_segments_hip")
+    def _reduce_segments_hip_fake(
+        output: torch.Tensor,
+        segm_output: torch.Tensor,
+        segm_max: torch.Tensor,
+        segm_expsum: torch.Tensor,
+        seq_lens: torch.Tensor,
+        query_start_len: torch.Tensor,
+        num_seqs: int,
+        num_query_heads: int,
+        head_size: int,
+        head_size_padded: int,
+        max_num_segments: int,
+        tile_size: int,
+    ) -> None:
+        return
+
+
 # moe
 def moe_sum(
     input: torch.Tensor,
