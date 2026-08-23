@@ -40,6 +40,26 @@ DFlash2 drafter 修复、ROCm 内核优化，以及调优过的双 7900 XTX 服�
 
 ---
 
+## 如何准备 qwen3.8-27b-mtp-fixed（模型准备）
+
+目标模型使用打过补丁的本地 checkpoint `qwen3.8-27b-mtp-fixed`，源自
+`Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`：
+
+1. 原仓库把全部 15 个 MTP tensor 以纯 **BF16** 存放在 `model_extra_tensors.safetensors` 中，
+   但其 `quantization_config.dynamic` 声明了**正规则** `"+:.*mtp.*"`（4-bit，group 64）。
+2. vLLM 的 GPTQ loader 信任该配置，按量化参数构建 MTP 层，权重加载失败
+   （`no module or parameter named 'layers.0.mlp.down_proj.weight'`）。
+3. **补丁**：把 `config.json` 中 `quantization_config.dynamic` 里的 `"+:"` 规则替换为一条
+   `"-:.*mtp.*"` 排除规则。vLLM 内置 workaround（`qwen3_5_mtp.py`）随即对 MTP 层禁用量化，
+   BF16 权重原样加载。上游参考：[vllm-project/vllm#48816](https://github.com/vllm-project/vllm/pull/48816)、
+   [#47828](https://github.com/vllm-project/vllm/pull/47828)。
+
+补丁后的 `config.json` 共 97 条 negative 规则、0 条 positive 规则（已验证：`"mtp"` 仅以
+`-:.*mtp.*` 形式出现）。DFlash2 以同一 checkpoint 作为目标模型；DFlash2 drafter 本身是
+独立的 `Qwen3.8-27B-DFlash2-bf16` checkpoint。
+
+---
+
 ## 如何运行
 
 ### 1. DFlash2 投机解码（默认）
@@ -116,13 +136,10 @@ python -m vllm.entrypoints.openai.api_server \
 
 ## 关键发现与坑
 
-1. **过期的 `torch.compile` AOT 缓存会静默破坏 CUDA Graph 输出** —— 修改模型代码后必须
-   `rm -rf ~/.cache/vllm/torch_compile_cache ~/.triton/cache`，否则 drafter 塌方为 token
-   `3`、接受率为 0，而 eager 模式仍正常。
-2. **`p_min` 提前截断：短上下文有益、长上下文有害** —— `DFLASH_P_MIN=0.3` 在 depth 0
+1. **`p_min` 提前截断：短上下文有益、长上下文有害** —— `DFLASH_P_MIN=0.3` 在 depth 0
    +9% decode，但在 8k 深度最多 -11%；长上下文场景保持 0。
-3. **vLLM `/health` 返回空 body + HTTP 200** —— 需检查 HTTP code 而非 body。
-4. **不要用 `pkill -9 -f "vllm"`** —— 会匹配到执行命令的 bash 自身，同一行后续命令静默
+2. **vLLM `/health` 返回空 body + HTTP 200** —— 需检查 HTTP code 而非 body。
+3. **不要用 `pkill -9 -f "vllm"`** —— 会匹配到执行命令的 bash 自身，同一行后续命令静默
    跳过；改用 `rocm-smi --showpids` 取 PID 杀进程。
 
 ---

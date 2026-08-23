@@ -40,6 +40,28 @@ This branch (`feat/dflash-perf-opt`) carries RDNA3-specific improvements on top 
 
 ---
 
+## Preparing the model checkpoint / 模型准备
+
+The target uses a patched local checkpoint `qwen3.8-27b-mtp-fixed`, derived from
+`Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ`:
+
+1. The stock repo stores all 15 MTP tensors as plain **BF16** in
+   `model_extra_tensors.safetensors`, but its `quantization_config.dynamic` declares
+   **positive** rules `"+:.*mtp.*"` (4-bit, group 64).
+2. vLLM's GPTQ loader trusts that config, builds MTP layers with quantized params, and
+   weight loading fails (`no module or parameter named 'layers.0.mlp.down_proj.weight'`).
+3. **Patch**: replace those `"+:"` rules with a single `"-:.*mtp.*"` exclusion in
+   `config.json` (`quantization_config.dynamic`). vLLM's built-in workaround
+   (`qwen3_5_mtp.py`) then disables quantization for MTP layers and loads the BF16
+   weights as-is. Upstream references: [vllm-project/vllm#48816](https://github.com/vllm-project/vllm/pull/48816),
+   [#47828](https://github.com/vllm-project/vllm/pull/47828).
+
+The patched `config.json` ends up with 97 negative rules and zero positive rules
+(verified: `"mtp"` appears only as `-:.*mtp.*`). DFlash2 uses the same checkpoint as the
+target; the DFlash2 drafter itself is a separate `Qwen3.8-27B-DFlash2-bf16` checkpoint.
+
+---
+
 ## How to run
 
 ### 1. DFlash2 speculative decoding (default)
@@ -117,13 +139,10 @@ Cells are `prefill (PP, tok/s) / decode (TG, tok/s)`. DFlash2/MTP are fair rerun
 
 ## Key findings & gotchas
 
-1. **Stale `torch.compile` AOT cache corrupts CUDA-graph output silently** — after modifying
-   model code, `rm -rf ~/.cache/vllm/torch_compile_cache ~/.triton/cache` or the drafter
-   collapses to token `3` with zero acceptance while eager mode stays correct.
-2. **`p_min` early-stop helps short context, hurts long context** — `DFLASH_P_MIN=0.3` gains
+1. **`p_min` early-stop helps short context, hurts long context** — `DFLASH_P_MIN=0.3` gains
    +9% decode at depth 0 but loses up to -11% at depth 8k; keep 0 for long-context workloads.
-3. **vLLM `/health` returns an empty body with HTTP 200** — check the HTTP code, not the body.
-4. **Don't `pkill -9 -f "vllm"`** — it matches the invoking shell itself and silently skips
+2. **vLLM `/health` returns an empty body with HTTP 200** — check the HTTP code, not the body.
+3. **Don't `pkill -9 -f "vllm"`** — it matches the invoking shell itself and silently skips
    subsequent commands in the same line; kill by PID from `rocm-smi --showpids` instead.
 
 ---
