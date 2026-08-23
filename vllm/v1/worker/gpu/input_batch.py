@@ -267,6 +267,8 @@ def _prepare_prefill_inputs_kernel(
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    if req_state_idx < 0:
+        return
     prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
     num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
     if num_computed >= prefill_len:
@@ -348,6 +350,9 @@ def _prepare_pos_seq_lens_kernel(
         return
 
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
+    if req_state_idx < 0:
+        tl.store(seq_lens_ptr + req_id, 0)
+        return
     num_computed_tokens = tl.load(num_computed_tokens_ptr + req_state_idx)
 
     start = tl.load(query_start_loc_ptr + req_id)
@@ -418,6 +423,9 @@ def _combine_sampled_and_draft_tokens_kernel(
         logits_start + block,
         mask=block < num_logits,
     )
+
+    if req_state_idx < 0:
+        return
 
     seq_len = tl.load(seq_lens_ptr + batch_idx)
     prefill_len = tl.load(prefill_len_ptr + req_state_idx)
@@ -502,6 +510,10 @@ def _get_num_sampled_and_rejected_kernel(
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    if req_state_idx < 0:
+        tl.store(num_sampled_ptr + batch_idx, 0)
+        tl.store(num_rejected_ptr + batch_idx, 0)
+        return
 
     seq_len = tl.load(seq_lens_ptr + batch_idx)
     prefill_len = tl.load(prefill_len_ptr + req_state_idx)
@@ -649,11 +661,13 @@ def _post_update_num_computed_tokens_kernel(
     query_start_loc_ptr,
 ):
     batch_id = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_id)
+    if req_state_idx < 0:
+        return
     query_start = tl.load(query_start_loc_ptr + batch_id)
     query_end = tl.load(query_start_loc_ptr + batch_id + 1)
     query_len = query_end - query_start
 
-    req_state_idx = tl.load(idx_mapping_ptr + batch_id)
     num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
     tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + query_len)
 
