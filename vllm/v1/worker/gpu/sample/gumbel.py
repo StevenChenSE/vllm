@@ -25,6 +25,8 @@ def _temperature_kernel(
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    if req_state_idx < 0:
+        return
     temperature = tl.load(temperature_ptr + req_state_idx).to(tl.float32)
     if temperature == 0.0 or temperature == 1.0:
         # Early return to avoid loading logits.
@@ -143,7 +145,8 @@ def gumbel_block_argmax(
 ):
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     is_valid_req = req_state_idx >= 0
-    temp = tl.load(temp_ptr + req_state_idx, mask=is_valid_req, other=0.0).to(
+    safe_req_idx = tl.maximum(req_state_idx, 0)
+    temp = tl.load(temp_ptr + safe_req_idx, mask=is_valid_req, other=0.0).to(
         tl.float32
     )
     if logits_cache_ptr is not None:
@@ -157,14 +160,14 @@ def gumbel_block_argmax(
             col = tl.load(logits_cache_col_ptr)
         tl.store(
             logits_cache_ptr
-            + req_state_idx * logits_cache_stride_0
+            + safe_req_idx * logits_cache_stride_0
             + col * logits_cache_stride_1
             + block,
             logits,
             mask=mask & is_valid_req,
         )
 
-    seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
+    seed = tl.load(seeds_ptr + safe_req_idx, mask=is_valid_req, other=0)
     pos = tl.load(pos_ptr + token_idx)
     return gumbel_noised_argmax(
         logits,

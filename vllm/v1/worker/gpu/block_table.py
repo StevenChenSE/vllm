@@ -303,6 +303,7 @@ def _compute_slot_mappings_kernel(
     block_size = tl.load(block_sizes + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
+    safe_req_idx = tl.maximum(req_state_idx, 0)
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
@@ -312,7 +313,7 @@ def _compute_slot_mappings_kernel(
         block_indices = positions // (block_size * CP_SIZE)
         block_offsets = positions % (block_size * CP_SIZE)
         block_numbers = tl.load(
-            block_table_ptr + req_state_idx * block_table_stride + block_indices
+            block_table_ptr + safe_req_idx * block_table_stride + block_indices
         )
 
         if CP_SIZE == 1:

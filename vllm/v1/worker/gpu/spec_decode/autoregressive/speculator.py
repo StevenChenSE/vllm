@@ -672,6 +672,7 @@ def _prepare_prefill_inputs_kernel(
     req_idx = tl.program_id(0)
     num_reqs = tl.num_programs(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    safe_req_idx = tl.maximum(req_state_idx, 0)
 
     query_start = tl.load(query_start_loc_ptr + req_idx)
     query_end = tl.load(query_start_loc_ptr + req_idx + 1)
@@ -680,15 +681,15 @@ def _prepare_prefill_inputs_kernel(
 
     # Get the true query length and next token after accounting for rejected tokens.
     num_rejected = tl.load(num_rejected_ptr + req_idx)
-    query_len -= num_rejected
+    query_len = tl.maximum(query_len - num_rejected, 1)
 
     num_sampled = tl.load(num_sampled_ptr + req_idx)
     if num_sampled > 0:
-        next_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
+        next_token = tl.load(last_sampled_ptr + safe_req_idx).to(tl.int32)
     else:
         # Chunked prefilling.
         # Get the next prefill token.
-        next_token = tl.load(next_prefill_tokens_ptr + req_state_idx)
+        next_token = tl.load(next_prefill_tokens_ptr + safe_req_idx)
 
     # Shift target_input_ids by one.
     for i in range(1, query_len, BLOCK_SIZE):
