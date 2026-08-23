@@ -143,20 +143,25 @@ for fair benchmarking — its per-step synchronize+print skews both prefill and 
 
 Measured with `llama-benchy 0.4.0` (`--pp 2048 --tg 128 --concurrency 1`, `2025-08-23`).
 Cells are `prefill (PP, tok/s) / decode (TG, tok/s)`. DFlash2/MTP are fair reruns without
-`VLLM_PROFILE_STEP`; stock vLLM and llama.cpp are from the same benchmark series.
+`VLLM_PROFILE_STEP`. **The stock vLLM column uses the early upstream numbers from 2026-08-20**
+(`--tg 32`, pre-RDNA3-optimization build) — the current fork with speculative decoding
+disabled measures higher (PP ~1657–1885 / TG ~52–56 across depths, inflated by the inherited
+JartX kernel work, so it would overstate "stock" performance); 32k/64k were not measured on
+stock. llama.cpp is a tg=128 run from the same benchmark series (IMPROVEMENTS.md §9.3).
 
-| Context depth | stock vLLM (no spec) | **vLLM DFlash2 (K=7)** | vLLM MTP (K=3) | llama.cpp (Q6_K_XL, MTP) |
+| Context depth | stock vLLM (upstream, early) | **vLLM DFlash2 (K=7)** | vLLM MTP (K=3) | llama.cpp (Q6_K_XL, MTP) |
 | :---: | :---: | :---: | :---: | :---: |
-| **0** | 1885 / 52.4 | 1805 / **93.1** | 1948 / **94.3** | 803 / 63.7 |
-| **8k** | 1657 / 46.9 | 1662 / **79.8** | 1646 / **86.8** | 929 / 65.6 |
-| **16k** | 1449 / 43.6 | 1447 / **69.1** | 1449 / 68.8 | 904 / 58.9 |
+| **0** | 1773 / 53.8 | 1805 / **93.1** | 1948 / **94.3** | 803 / 63.7 |
+| **8k** | 1131 / 49.4 | 1662 / **79.8** | 1646 / **86.8** | 929 / 65.6 |
+| **16k** | 838 / 45.7 | 1447 / **69.1** | 1449 / 68.8 | 904 / 58.9 |
 | **32k** | — | 1163 / **62.0** | 1190 / **64.2** | — |
 | **64k** | — | 836 / **56.1** | 848 / **56.9** | — |
 
 ### Takeaways
 
-- **Speculative decoding wins big**: DFlash2/MTP beat stock vLLM decode by **+30–80%** across
-  0–64k context (52→93 tok/s at depth 0).
+- **Speculative decoding wins big**: DFlash2/MTP beat stock vLLM decode by **+50–80%** across
+  0–16k context (54→93 tok/s at depth 0); prefill holds up at depth (1131→1662 tok/s @8k)
+  while stock prefill decays hard (1773→838 @16k).
 - **DFlash2 vs MTP are statistically tied** (differences within ±10% measurement noise);
   the only stable gap is depth 8k where MTP leads ~10%.
 - **Depth decay is identical** for both (~-40% at 64k, 93→56 tok/s).
