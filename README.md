@@ -15,12 +15,43 @@ DFlash2 drafter fixes, ROCm kernel optimizations, and a tuned dual-7900-XTX serv
 
 This branch (`feat/dflash-perf-opt`) carries RDNA3-specific improvements on top of upstream vLLM:
 
-- **DFlash2 speculative decoding fixes** — resolves the CUDA-graph zero-acceptance collapse
-  (root cause: stale `torch.compile` AOT cache; see `DFLASH2_CG_FIX_PLAN.md` for the full
-  investigation). Acceptance rate restored, draft tokens are real, 0–64k context stable.
+- **DFlash2 speculative decoding fixes** — resolves the CUDA-graph zero-acceptance collapse on
+  ROCm. Acceptance rate restored, draft tokens are real, 0–64k context stable.
 - **ROCm kernel work** — fused native HIP kernels for 1D grouped conv and split-kv reduction,
   sliding-window detection hardening, draft-token sanitization.
+- **RDNA3 optimizations inherited from [JartX/vllm](https://github.com/JartX/vllm)** — after
+  auditing its branches, the following items are present in this branch (verified against the
+  branch history):
+  - Triton attention adaptive prefill tuning (`BLOCK_M`/`num_warps` by KV length, `6cb90f545`)
+  - 3D split-KV softmax NaN fix for long-context decode (`6b84c6c6c`)
+  - bounds-safe Triton attention indexing + `triton_quant_kv` dtype caching (`883e982e6`)
+  - RDNA3 W4A16 GPTQ kernels (`csrc/rocm/q_gemm_rdna3*.cu`, in use at runtime as
+    `RDNA3W4A16LinearKernel`)
+  - INT8 per-tensor KV cache (`647b3883b`, code kept; not usable on this model without
+    pre-calibrated scales)
+  - Note: **hostar all-reduce and WMMA paged-prefill were tried and reverted** (`4a8e2652f`,
+    negative end-to-end gains), and MoE work is **not** in this branch.
+  **Because of these inherited gains, the "stock vLLM" column in the benchmarks below is the
+  same fork with speculative decoding disabled — its prefill/decode are higher than pure
+  upstream vLLM.** Credit for these improvements goes to JartX's work.
 - **Tuned dual-7900-XTX serving config** — see below for the launch recipe and measured numbers.
+
+---
+
+## Building from source
+
+```bash
+# Prerequisites: ROCm >= 6.x with a matching PyTorch ROCm wheel, CMake >= 3.26, HIP toolchain.
+cd vllm
+pip install -e .          # auto-detects ROCm via torch.version.hip (VLLM_TARGET_DEVICE=rocm)
+python -c "import vllm; print(vllm.__version__)"   # verify the editable install
+```
+
+- The HIP C++ kernels in `csrc/rocm/` (including `RDNA3W4A16LinearKernel`) are compiled by the
+  same editable install; `ROCM_HOME` is picked up automatically, `HSA_OVERRIDE_GFX_VERSION=11.0.0`
+  is only needed at runtime (and for Triton JIT targeting gfx1100 via `GCN_ARCH_NAME`).
+- A working editable build is what the rest of this document assumes; the launch recipes use the
+  repo's `serve-bootstrap.py` wrapper, but plain `vllm serve` works identically.
 
 ---
 
@@ -59,8 +90,9 @@ The target uses a patched local checkpoint `qwen3.8-27b-mtp-fixed`, derived from
 
 The patched `config.json` ends up with 97 negative rules and zero positive rules
 (verified against the local `qwen3.8-27b-mtp-fixed/config.json`: `"mtp"` appears only as
-`-:.*mtp.*`). DFlash2 uses the same checkpoint as the target; the DFlash2 drafter itself
-is a separate `Qwen3.8-27B-DFlash2-bf16` checkpoint.
+`-:.*mtp.*`). DFlash2 uses the same checkpoint as the target; the DFlash2 drafter itself is a
+separate checkpoint, served locally as `Qwen3.8-27B-DFlash2-bf16` and mirrored upstream at
+[`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2).
 
 ---
 

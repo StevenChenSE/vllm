@@ -15,12 +15,40 @@ DFlash2 drafter 修复、ROCm 内核优化，以及调优过的双 7900 XTX 服�
 
 本分支（`feat/dflash-perf-opt`）在上游 vLLM 之上携带 RDNA3 专用改进：
 
-- **DFlash2 投机解码修复** — 解决 CUDA Graph 下的零接受率塌方问题（根因：过期的
-  `torch.compile` AOT 缓存；完整调查见 `DFLASH2_CG_FIX_PLAN.md`）。接受率已恢复、
-  draft token 真实、0–64k 上下文稳定。
+- **DFlash2 投机解码修复** — 解决 CUDA Graph 下的零接受率塌方问题（ROCm 平台）。
+  接受率已恢复、draft token 真实、0–64k 上下文稳定。
 - **ROCm 内核工作** — 1D grouped conv 与 split-kv reduction 的原生融合 HIP 内核、
   sliding-window 检测加固、draft token 净化。
+- **继承自 [JartX/vllm](https://github.com/JartX/vllm) 的 RDNA3 优化** — 对其分支审计后，
+  以下项目确认在本分支中（已对照分支历史核实）：
+  - Triton attention 自适应 prefill 调优（按 KV 长度选择 `BLOCK_M`/`num_warps`，`6cb90f545`）
+  - 3D split-KV softmax NaN 修复（长上下文 decode，`6b84c6c6c`）
+  - bounds-safe Triton attention 索引 + `triton_quant_kv` dtype 缓存（`883e982e6`）
+  - RDNA3 W4A16 GPTQ 内核（`csrc/rocm/q_gemm_rdna3*.cu`，运行时以
+    `RDNA3W4A16LinearKernel` 使用）
+  - INT8 per-tensor KV cache（`647b3883b`，代码保留；本模型无预校准 scale 不可用）
+  - 注意：**hostar all-reduce 与 WMMA paged-prefill 曾尝试但已回滚**（`4a8e2652f`，端到端
+    收益为负）；MoE 工作**不在**本分支。
+  **由于这些继承的优化，下方基准中的 "stock vLLM" 列实为同一 fork 关闭投机解码的状态——
+  其 prefill/decode 高于纯上游 vLLM。** 这些改进归功于 JartX 的工作。
 - **调优的双 7900 XTX 服务配置** — 见下方启动配方与实测数据。
+
+---
+
+## 从源码构建
+
+```bash
+# 前置：ROCm >= 6.x + 匹配的 PyTorch ROCm wheel，CMake >= 3.26，HIP 工具链。
+cd vllm
+pip install -e .          # 通过 torch.version.hip 自动识别 ROCm（VLLM_TARGET_DEVICE=rocm）
+python -c "import vllm; print(vllm.__version__)"   # 验证 editable 安装
+```
+
+- `csrc/rocm/` 下的 HIP C++ 内核（含 `RDNA3W4A16LinearKernel`）由同一 editable 安装编译；
+  `ROCM_HOME` 自动识别，`HSA_OVERRIDE_GFX_VERSION=11.0.0` 仅在运行时需要（并供 Triton JIT
+  通过 `GCN_ARCH_NAME` 定位 gfx1100）。
+- 本文档其余部分假定已完成可用的 editable 构建；启动配方使用本仓库的 `serve-bootstrap.py`
+  包装，但直接 `vllm serve` 效果相同。
 
 ---
 
@@ -58,8 +86,9 @@ DFlash2 drafter 修复、ROCm 内核优化，以及调优过的双 7900 XTX 服�
 
 补丁后的 `config.json` 共 97 条 negative 规则、0 条 positive 规则（已对照本地
 `qwen3.8-27b-mtp-fixed/config.json` 核实：`"mtp"` 仅以 `-:.*mtp.*` 形式出现）。DFlash2 以
-同一 checkpoint 作为目标模型；DFlash2 drafter 本身是独立的
-`Qwen3.8-27B-DFlash2-bf16` checkpoint。
+同一 checkpoint 作为目标模型；DFlash2 drafter 本身是独立 checkpoint，本地以
+`Qwen3.8-27B-DFlash2-bf16` 提供，上游镜像见
+[`z-lab/Qwen3.8-27B-DFlash2`](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2)。
 
 ---
 
