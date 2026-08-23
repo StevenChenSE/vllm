@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -82,7 +83,7 @@ def _grouped_conv_fused_kernel(
 
     tl.store(
         output_ptr + h_idx_0,
-        out.to(hidden_ptr.dtype.element_ty),
+        out.to(tl.bfloat16),
         mask=mask_n[:, None],
     )
 
@@ -96,33 +97,6 @@ def _grouped_conv(
     group_size: int,
     taps: int,
 ) -> torch.Tensor:
-    if taps == 2 and hidden_states.is_cuda and hidden_states.is_contiguous():
-        if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "grouped_conv_fused_hip"):
-            return torch.ops._rocm_C.grouped_conv_fused_hip(
-                hidden_states, delta, base, block_size, num_groups, group_size
-            )
-        N = hidden_states.shape[0]
-        hidden_size = num_groups * group_size
-        output = torch.empty_like(hidden_states)
-        BLOCK_N = 8
-        grid = (triton.cdiv(N, BLOCK_N), num_groups)
-        _grouped_conv_fused_kernel[grid](
-            hidden_states,
-            delta,
-            base,
-            output,
-            N=N,
-            stride_delta_n=delta.stride(0),
-            stride_delta_t=delta.stride(1),
-            stride_delta_g=delta.stride(2),
-            num_groups=num_groups,
-            group_size=group_size,
-            hidden_size=hidden_size,
-            block_size=block_size,
-            BLOCK_N=BLOCK_N,
-        )
-        return output
-
     blocks = hidden_states.unflatten(-1, (num_groups, group_size))
     coefficients = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
     output = coefficients[:, 0] * blocks
@@ -266,12 +240,15 @@ def _score_edges(
     hidden: torch.Tensor,
     anchor_token_ids: torch.Tensor,
 ) -> torch.Tensor:
+    vocab_size = predecessor_table.shape[0]
+    safe_cand_ids = torch.clamp(candidate_ids, 0, vocab_size - 1)
+    safe_anchor_ids = torch.clamp(anchor_token_ids, 0, vocab_size - 1)
     top_k = candidate_ids.shape[-1]
-    successors = successor_table[candidate_ids]
+    successors = successor_table[safe_cand_ids]
     predecessor_ids = torch.cat(
         (
-            anchor_token_ids[:, None, None].expand(-1, 1, top_k),
-            candidate_ids[:, :-1],
+            safe_anchor_ids[:, None, None].expand(-1, 1, top_k),
+            safe_cand_ids[:, :-1],
         ),
         dim=1,
     )

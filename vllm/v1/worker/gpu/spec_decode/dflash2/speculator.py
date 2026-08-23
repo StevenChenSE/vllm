@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import sys
 from typing import Any
 
 import torch
@@ -36,8 +37,8 @@ def _selector_walk_kernel(
     mask = offsets < top_k
     req_state = tl.load(req_state_ptr + row * num_steps)
     valid = req_state >= 0
-    temperature = tl.load(temperature_ptr + req_state, mask=valid, other=0.0)
-    seed = tl.load(seeds_ptr + req_state, mask=valid, other=0)
+    temperature = tl.load(temperature_ptr + row, mask=valid, other=0.0)
+    seed = tl.load(seeds_ptr + row, mask=valid, other=0)
     previous = 0
     active = True
     valid_count = 0
@@ -76,9 +77,9 @@ def _selector_walk_kernel(
 
         if p_min > 0.0:
             chosen_score = tl.load(scores_ptr + score_base + index, mask=valid, other=0.0)
-            diff = scores - chosen_score
+            diff = tl.maximum(scores - chosen_score, -50.0)
             sum_exp = tl.sum(tl.where(mask & valid, tl.exp(diff), 0.0))
-            prob = 1.0 / sum_exp
+            prob = tl.where(sum_exp > 0.0, 1.0 / sum_exp, 0.0)
             if prob < p_min:
                 active = False
 
@@ -165,6 +166,7 @@ class DFlash2Speculator(DFlashSpeculator):
         scores: torch.Tensor,
         num_reqs: int,
     ) -> None:
+        self._selector_scores.zero_()
         block_k = triton.next_power_of_2(self.selector_top_k)
         _selector_walk_kernel[(num_reqs,)](
             scores.contiguous(),

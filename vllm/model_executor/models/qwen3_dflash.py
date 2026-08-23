@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
+import sys
 from collections.abc import Iterable
 
 import torch
@@ -408,6 +409,7 @@ class DFlashQwen3Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.start_layer_id = start_layer_id
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
@@ -883,7 +885,8 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             orig_to_new_substr["mask_embedding"] = None
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
-        loader.load_weights(model_weights.items(), mapper=mapper)
+        loaded_params = loader.load_weights(model_weights.items(), mapper=mapper)
+        logger.info(f"[DFlash] Successfully loaded {len(loaded_params)} weights into drafter model!")
         self.model._build_fused_kv_buffers()
 
     def _read_mask_embedding(self) -> torch.Tensor | None:

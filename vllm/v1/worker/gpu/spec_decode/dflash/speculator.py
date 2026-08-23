@@ -676,10 +676,10 @@ def _prepare_dflash_inputs_kernel(
         )
         # Copy sampling state.
         tl.store(
-            out_temperature_ptr + req_state_idx,
+            out_temperature_ptr + req_idx,
             tl.load(temperature_ptr + req_state_idx),
         )
-        tl.store(out_seeds_ptr + req_state_idx, tl.load(seeds_ptr + req_state_idx))
+        tl.store(out_seeds_ptr + req_idx, tl.load(seeds_ptr + req_state_idx))
         if req_idx == num_reqs - 1:
             # Pad per-request buffers to max_num_reqs for CUDA graph safety.
             last_query_end = num_reqs * num_query_per_req

@@ -52,7 +52,9 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     target_language_model = (
         target_model.get_language_model()
         if hasattr(target_model, "get_language_model")
-        else getattr(target_model, "language_model", target_model)
+        else getattr(target_model, "language_model", None)
+        or getattr(getattr(target_model, "model", None), "language_model", None)
+        or target_model
     )
     # MuseGlimmerForCausalLM marks its inner MuseGlimmerModel as the language
     # model, so get_language_model() already returns the inner module and has
@@ -62,9 +64,13 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     # Skip embedding sharing under PP — each rank owns its own embedding.
     if get_pp_group().world_size == 1:
-        target_embed = getattr(target_inner, "embed_tokens", None) or getattr(
-            target_inner, "embedding", None
-        ) or getattr(getattr(target_language_model, "model", None), "embed_tokens", None)
+        target_embed = (
+            getattr(target_inner, "embed_tokens", None)
+            or getattr(target_inner, "embedding", None)
+            or getattr(target_language_model, "embed_tokens", None)
+            or getattr(getattr(target_model, "model", None), "embed_tokens", None)
+            or getattr(target_model, "embed_tokens", None)
+        )
         draft_embed = getattr(draft_inner, "embed_tokens", None)
         if target_embed is not None and _should_share(
             dflash_model, "has_own_embed_tokens", draft_embed, target_embed
@@ -73,7 +79,12 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
                 del draft_inner.embed_tokens
             draft_inner.embed_tokens = target_embed
 
-    target_lm_head = get_target_lm_head(target_model, target_language_model)
+    target_lm_head = (
+        getattr(target_language_model, "lm_head", None)
+        or getattr(target_model, "lm_head", None)
+        or getattr(getattr(target_model, "model", None), "lm_head", None)
+        or get_target_lm_head(target_model, target_language_model)
+    )
     draft_lm_head = getattr(dflash_model, "lm_head", None)
     if target_lm_head is not None and _should_share(
         dflash_model, "has_own_lm_head", draft_lm_head, target_lm_head
