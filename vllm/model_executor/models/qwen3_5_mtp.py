@@ -37,6 +37,7 @@ from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsMambaPrefixCaching,
     SupportsMultiModal,
     _require_is_multimodal,
 )
@@ -212,7 +213,12 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         "hidden_states": 0,
     }
 )
-class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
+class Qwen3_5MTP(
+    LocalArgmaxMixin,
+    nn.Module,
+    SupportsMultiModal,
+    SupportsMambaPrefixCaching,
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -226,11 +232,6 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         cache_config = vllm_config.cache_config
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Qwen3_5MTP currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
 
         self.quant_config = vllm_config.quant_config
 

@@ -1841,7 +1841,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             with use_workspace_lane(self._draft_workspace_lane):
-                do_prof = os.environ.get("VLLM_PROFILE_STEP") == "1"
+                do_prof = os.environ.get("VLLM_PROFILE_STEP") == "1" and not torch.cuda.is_current_stream_capturing()
                 if do_prof:
                     torch.cuda.synchronize()
                     t_prop_start = time.perf_counter()

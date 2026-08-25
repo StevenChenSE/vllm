@@ -720,6 +720,7 @@ def reduce_segments(
     seq_idx = find_seq_idx(
         query_start_len_ptr, query_token_idx, num_seqs, BLOCK_Q, False
     )
+    seq_idx = tl.maximum(0, tl.minimum(num_seqs - 1, seq_idx))
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
@@ -742,15 +743,21 @@ def reduce_segments(
         + tl.arange(0, NUM_SEGMENTS_PER_SEQ)
     )
     segm_max = tl.load(segm_max_ptr + segm_offset, mask=segm_mask, other=float("-inf"))
+    segm_max = tl.where(segm_max != segm_max, float("-inf"), segm_max)
     overall_max = tl.max(segm_max)
-    overall_max_safe = tl.where(overall_max == float("-inf"), 0.0, overall_max)
+    overall_max_safe = tl.where(
+        (overall_max == float("-inf")) | (overall_max != overall_max), 0.0, overall_max
+    )
     segm_diff = tl.where(
-        segm_max == float("-inf"), -10000.0, segm_max - overall_max_safe
+        (segm_max == float("-inf")) | (segm_max != segm_max), -10000.0, segm_max - overall_max_safe
     )
 
     # load and rescale segment exp sums
     segm_expsum = tl.load(segm_expsum_ptr + segm_offset, mask=segm_mask, other=0.0)
-    segm_weight = tl.where(segm_max == float("-inf"), 0.0, tl.exp(segm_diff))
+    segm_expsum = tl.where(segm_expsum != segm_expsum, 0.0, segm_expsum)
+    segm_weight = tl.where(
+        (segm_max == float("-inf")) | (segm_max != segm_max), 0.0, tl.exp(segm_diff)
+    )
     segm_expsum = segm_expsum * segm_weight
     overall_expsum = tl.sum(segm_expsum)
 
@@ -768,10 +775,16 @@ def reduce_segments(
         other=0.0,
     )
     segm_weight_2d = segm_weight[:, None]
-    segm_output = tl.where(segm_weight_2d == 0.0, 0.0, segm_output * segm_weight_2d)
+    segm_output = tl.where(
+        (segm_weight_2d == 0.0) | (segm_weight_2d != segm_weight_2d), 0.0, segm_output * segm_weight_2d
+    )
     acc_sum = tl.sum(segm_output, axis=0)
-    safe_expsum = tl.where(overall_expsum == 0.0, 1.0, overall_expsum)
-    acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / safe_expsum)
+    safe_expsum = tl.where(
+        (overall_expsum == 0.0) | (overall_expsum != overall_expsum), 1.0, overall_expsum
+    )
+    acc = tl.where(
+        (overall_expsum == 0.0) | (overall_expsum != overall_expsum), 0.0, acc_sum / safe_expsum
+    )
 
     if USE_FP8:
         acc = acc * tl.load(out_scale_inv)
