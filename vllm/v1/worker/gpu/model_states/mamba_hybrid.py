@@ -104,8 +104,13 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
+            mamba_bs = (
+                self._mamba_spec.block_size
+                if self._mamba_spec is not None
+                else getattr(self.cache_config, "mamba_block_size", 1600)
+            )
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+                (new_req_data.num_computed_tokens - 1) // mamba_bs
             )
 
     def _get_mamba_group_info(
@@ -190,6 +195,7 @@ class MambaHybridModelState(DefaultModelState):
         # the launch cost is ~0.3% of TPOT, so the GPU fast-exit suffices.)
         block = 256
         grid = (triton.cdiv(num_reqs, block),)
+
         preprocess_mamba_align_fused_kernel[grid](
             input_batch.idx_mapping,
             self._mamba_state_idx_gpu,

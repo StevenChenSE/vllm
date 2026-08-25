@@ -180,7 +180,11 @@ def _copy_mamba_state_block(
     # Widen block ids to int64 before they reach `block_id * state_block_stride`
     # below: state_block_stride can exceed 2**31 bytes for large mamba caches,
     # and Triton would otherwise do the multiply in int32 and wrap.
+    if dst_col < 0 or src_col < 0:
+        return
     dest_block_id = tl.load(block_table_base + dst_col).to(tl.int64)
+    if dest_block_id <= 0:
+        return
     dst_addr = state_base_addr + dest_block_id * state_block_stride
 
     is_conv_state = conv_width > 0
@@ -192,6 +196,8 @@ def _copy_mamba_state_block(
             return
         # DS conv layout: state_len is the slide axis; copy per dim row.
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
+        if src_block_id <= 0:
+            return
         dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
         row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
         src_block_addr = state_base_addr + src_block_id * state_block_stride
@@ -243,6 +249,8 @@ def _copy_mamba_state_block(
         #   state[bt[src_col], token_bias:] ->
         #   state[bt[dst_col], :conv_width - token_bias]
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
+        if src_block_id <= 0:
+            return
         src_block_addr = state_base_addr + src_block_id * state_block_stride
         token_bytes = state_inner_size * state_elem_size
         num_dst_tokens = conv_width - token_bias
@@ -282,6 +290,8 @@ def _copy_mamba_state_block(
     # Body u64 range is partitioned across TEMPORAL_TILES CTAs to keep the
     # SMs filled at small batch.
     actual_src_block_id = tl.load(block_table_base + src_col + token_bias).to(tl.int64)
+    if actual_src_block_id <= 0:
+        return
     src_addr = state_base_addr + actual_src_block_id * state_block_stride
     # Use natural block data size (inner_size * elem_size), NOT
     # state_block_stride which is the page stride and can exceed the
@@ -399,6 +409,16 @@ def postprocess_mamba_fused_kernel(
     # Compute copy parameters
     accept_token_bias = aligned_new_computed - num_tokens_running_state
     dest_block_idx = aligned_new_computed // block_size - 1
+
+    # Degenerate step: the sequence advanced by less than one full state block
+    # (e.g. a fully prefix-cached request with zero new tokens, or a decode
+    # step whose computed count did not cross a block boundary). There is no
+    # aligned destination block: dest_block_idx is negative and would index
+    # before the request's block-table row, loading a garbage block id that
+    # either faults (illegal memory access) or writes into an unrelated pool
+    # block (state corruption -> NaN logits / duct degeneration).
+    if dest_block_idx < 0 or src_block_idx < 0:
+        return
 
     # Update accepted-token count before early exits (per-request, so only
     # state_idx == 0 writes). Also guard on tile_idx == 0 so tiles > 0
