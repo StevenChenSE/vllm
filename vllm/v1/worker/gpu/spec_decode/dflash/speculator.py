@@ -437,10 +437,12 @@ class DFlashSpeculator(DraftModelSpeculator):
             ]
         else:
             context_slots = self._context_slot_mappings[0][:num_target_tokens]
-        # Slicing context_slots to match the most recent sliding_window tokens:
-        # Avoids slicing mismatch and eliminates out-of-window pointer lookups
+        # Slicing context_slots, hidden_states, and context_positions to match the most recent sliding_window tokens:
+        # Avoids slicing mismatch and eliminates out-of-window pointer lookups & OOB GPU memory faults
         max_sw = getattr(self.draft_model_config.hf_config, "sliding_window", None)
         if max_sw is not None and num_target_tokens > max_sw:
+            ctx_hidden_states = self.hidden_states[num_target_tokens - max_sw : num_target_tokens]
+            ctx_positions = self.context_positions[num_target_tokens - max_sw : num_target_tokens]
             if context_slots is not None:
                 if isinstance(context_slots, (list, tuple)):
                     context_slots = [
@@ -449,10 +451,13 @@ class DFlashSpeculator(DraftModelSpeculator):
                     ]
                 else:
                     context_slots = context_slots[-max_sw:]
+        else:
+            ctx_hidden_states = self.hidden_states[:num_target_tokens]
+            ctx_positions = self.context_positions[:num_target_tokens]
 
         self.model.precompute_and_store_context_kv(
-            self.hidden_states[:num_target_tokens],
-            self.context_positions[:num_target_tokens],
+            ctx_hidden_states,
+            ctx_positions,
             context_slots,
         )
         if do_dflash_prof:

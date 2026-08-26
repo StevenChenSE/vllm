@@ -622,7 +622,10 @@ class DFlashQwen3Model(nn.Module):
         # If prompt length exceeds the drafter's sliding window (when configured),
         # only the most recent window of tokens is ever attended to by the drafter.
         # Slicing saves up to 8x-16x redundant KV projection GEMM & cache write overhead!
-        max_sw = getattr(self.config, "sliding_window", None)
+        dflash_cfg = getattr(self.config, "dflash_config", None) or {}
+        max_sw = getattr(self.config, "sliding_window", None) or (
+            dflash_cfg.get("sliding_window", None) if isinstance(dflash_cfg, dict) else getattr(dflash_cfg, "sliding_window", None)
+        )
         if max_sw is not None and num_ctx > max_sw:
             context_states = context_states[-max_sw:]
             context_positions = context_positions[-max_sw:]
