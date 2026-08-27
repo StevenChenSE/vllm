@@ -1158,5 +1158,7 @@ def mamba_get_block_table_tensor(
             device=block_table.device,
             dtype=torch.int32,
         )
-        indices_to_gather = (start_indices.unsqueeze(1) + offsets).to(torch.int64)
+        indices_to_gather = (start_indices.unsqueeze(1) + offsets).clamp(
+            max=block_table.size(1) - 1
+        ).to(torch.int64)
         return torch.gather(block_table, 1, indices_to_gather)

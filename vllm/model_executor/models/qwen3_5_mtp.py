@@ -216,7 +216,6 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
 class Qwen3_5MTP(
     LocalArgmaxMixin,
     nn.Module,
-    SupportsMultiModal,
     SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping = {
@@ -255,31 +254,8 @@ class Qwen3_5MTP(
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
-    def embed_input_ids(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None = None,
-        *,
-        is_multimodal: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.model.embed_input_ids,
-            is_multimodal=is_multimodal,
-        )
-
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return inputs_embeds
-
-        is_multimodal = _require_is_multimodal(is_multimodal)
-
-        inputs_embeds = _merge_multimodal_embeddings(
-            inputs_embeds=inputs_embeds,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
-        )
-
-        return inputs_embeds
+    def embed_input_ids(self, input_ids: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
