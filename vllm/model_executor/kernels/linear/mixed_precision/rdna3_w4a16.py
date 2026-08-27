@@ -186,7 +186,14 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         assert w_zp is not None, "Zero points are required by RDNA3 W4A16"
         assert w_g_idx is not None, "g_idx tensor (possibly empty) required"
 
+        orig_dtype = x_2d.dtype
+        if x_2d.dtype != w_s.dtype:
+            x_2d = x_2d.to(dtype=w_s.dtype)
+
         output = ops.gptq_gemm_rdna3(x_2d, w_q, w_zp, w_s, w_g_idx, False)
+
+        if output.dtype != orig_dtype:
+            output = output.to(dtype=orig_dtype)
 
         if bias is not None:
             output.add_(bias)

@@ -494,13 +494,21 @@ class DFlashQwen3Model(nn.Module):
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
-        # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0)
-        if has_bias:
-            kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-            self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+        # Check if qkv_proj layers have standard unquantized float weights
+        first_qkv = layers_attn[0].qkv_proj
+        self._is_quantized_qkv = not hasattr(first_qkv, "weight") or first_qkv.weight is None
+
+        if not self._is_quantized_qkv:
+            # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
+            kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+            self._fused_kv_weight = torch.cat(kv_weights, dim=0)
+            if has_bias:
+                kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
+                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+            else:
+                self._fused_kv_bias = None
         else:
+            self._fused_kv_weight = None
             self._fused_kv_bias = None
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
@@ -560,7 +568,6 @@ class DFlashQwen3Model(nn.Module):
         num_kv_heads: int,
         head_dim: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # --- Fused KV projection (one GEMM for all layers) ---
         normed_context_states = torch.empty_like(context_states)
         ops.rms_norm(
             normed_context_states,
@@ -568,19 +575,34 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
-        all_kv_flat = F.linear(
-            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-        )
-        # Single contiguous copy that separates K/V and transposes to
-        # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
-        # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
-        all_kv = (
-            all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
-            .permute(2, 1, 0, 3, 4)
-            .contiguous()
-        )
-        all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
-        all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
+        if not getattr(self, "_is_quantized_qkv", False):
+            # --- Fused KV projection (one GEMM for all layers) ---
+            all_kv_flat = F.linear(
+                normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+            )
+            # Single contiguous copy that separates K/V and transposes to
+            # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
+            # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
+            all_kv = (
+                all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+                .permute(2, 1, 0, 3, 4)
+                .contiguous()
+            )
+            all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
+            all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
+        else:
+            # --- Quantized KV projection (layer-by-layer) ---
+            ks = []
+            vs = []
+            for layer in self.layers:
+                attn = layer.self_attn
+                qkv, _ = attn.qkv_proj(normed_context_states)
+                k = qkv[..., attn.q_size : attn.q_size + attn.kv_size]
+                v = qkv[..., attn.q_size + attn.kv_size :]
+                ks.append(k.view(num_ctx, num_kv_heads, head_dim))
+                vs.append(v.view(num_ctx, num_kv_heads, head_dim))
+            all_k = torch.stack(ks, dim=0).contiguous()
+            all_v = torch.stack(vs, dim=0).contiguous()
         return all_k, all_v
 
     def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
