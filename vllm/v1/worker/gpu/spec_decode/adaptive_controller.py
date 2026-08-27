@@ -131,11 +131,15 @@ class AdaptiveSpecController:
         cur_min = n_min if n_min is not None else self.n_min
 
         if not self.enabled:
-            return torch.full_like(idx_mapping, cur_max, dtype=torch.int32)
+            return torch.full(
+                (idx_mapping.shape[0],), cur_max, dtype=torch.int32, device=self.device
+            )
 
-        num_reqs = idx_mapping.shape[0]
-        out_lens = torch.zeros((num_reqs,), dtype=torch.int32, device=self.device)
-        for i in range(num_reqs):
-            req_idx = int(idx_mapping[i].item())
-            out_lens[i] = self.get_effective_draft_length(req_idx, cur_max, cur_min)
-        return out_lens
+        valid_mask = (idx_mapping >= 0) & (idx_mapping < self.max_num_reqs)
+        safe_indices = torch.where(valid_mask, idx_mapping, 0)
+        ema_vals = self.acc_ema[safe_indices]
+        eff_lens = torch.clamp(torch.round(ema_vals).to(torch.int32), cur_min, cur_max)
+        eff_lens = torch.where(valid_mask, eff_lens, cur_max)
+
+        self.last_draft_len[safe_indices] = torch.where(valid_mask, eff_lens, 0)
+        return eff_lens

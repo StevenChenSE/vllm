@@ -301,10 +301,11 @@ class DFlashSpeculator(DraftModelSpeculator):
                 n_max=self.num_speculative_steps,
                 n_min=self.adaptive_controller.n_min,
             )
-            for i in range(num_reqs):
-                l_eff = int(eff_lens[i].item())
-                if l_eff < self.num_speculative_steps:
-                    reshaped[i, l_eff:] = -1
+            step_indices = torch.arange(
+                self.num_speculative_steps, device=reshaped.device
+            )
+            skip_mask = step_indices[None, :] >= eff_lens[:, None]
+            reshaped.masked_fill_(skip_mask, -1)
         self.draft_tokens[:num_reqs] = reshaped
 
     def _build_draft_attn_metadata(
