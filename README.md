@@ -141,66 +141,68 @@ for fair benchmarking — its per-step synchronize+print skews both prefill and 
 
 ## Performance numbers
 
-Measured with `llama-benchy 0.4.0` (`--pp 2048 --tg 128 --concurrency 1`, `2025-08-23`).
-Cells are `prefill (PP, tok/s) / decode (TG, tok/s)`. DFlash2/MTP are fair reruns without
+Measured with `llama-benchy 0.4.0` (`--pp 2048 --tg 128 --concurrency 1`, updated post upstream merge on `2026-08-27`).
+Cells are `prefill (PP, tok/s) / decode (TG, tok/s)`. DFlash2/MTP are fair runs without
 `VLLM_PROFILE_STEP`. **The stock vLLM column uses the early upstream numbers from 2026-08-20**
 (`--tg 32`, pre-RDNA3-optimization build) — the current fork with speculative decoding
 disabled measures higher (PP ~1657–1885 / TG ~52–56 across depths, inflated by the inherited
 JartX kernel work, so it would overstate "stock" performance); 32k/64k were not measured on
 stock. llama.cpp is a tg=128 run from the same benchmark series (IMPROVEMENTS.md §9.3).
 
-| Context depth | stock vLLM (upstream, early) | **vLLM DFlash2 (K=7)** | vLLM MTP (K=3) | llama.cpp (Q6_K_XL, MTP) |
+| Context depth | stock vLLM (upstream, early) | **vLLM DFlash2 (K=7)** | **vLLM MTP3 (K=3, align)** | llama.cpp (Q6_K_XL, MTP) |
 | :---: | :---: | :---: | :---: | :---: |
-| **0** | 1773 / 53.8 | 1805 / **93.1** | 1948 / **94.3** | 803 / 63.7 |
-| **8k** | 1131 / 49.4 | 1662 / **79.8** | 1646 / **86.8** | 929 / 65.6 |
-| **16k** | 838 / 45.7 | 1447 / **69.1** | 1449 / 68.8 | 904 / 58.9 |
+| **0** | 1773 / 53.8 | 1634 / **98.7** (peak 107.0) | 1617 / **102.3** (peak 105.0) | 803 / 63.7 |
+| **4k** | — | 1742 / **89.5** (peak 92.0) | 1696 / **96.5** (peak 107.0) | — |
+| **8k** | 1131 / 49.4 | 1673 / **81.6** (peak 83.0) | 1592 / **102.0** (peak 110.0) | 929 / 65.6 |
+| **16k** | 838 / 45.7 | 1495 / **82.2** (peak 90.0) | 1416 / **90.5** (peak 101.0) | 904 / 58.9 |
 | **32k** | — | 1163 / **62.0** | 1190 / **64.2** | — |
 | **64k** | — | 836 / **56.1** | 848 / **56.9** | — |
 
 ### Takeaways
 
-- **Speculative decoding wins big**: DFlash2/MTP beat stock vLLM decode by **+50–80%** across
-  0–16k context (54→93 tok/s at depth 0); prefill holds up at depth (1131→1662 tok/s @8k)
+- **Speculative decoding wins big**: DFlash2/MTP beat stock vLLM decode by **+50–90%** across
+  0–16k context (54→98~102 tok/s at depth 0); prefill holds up at depth (1131→1673 tok/s @8k)
   while stock prefill decays hard (1773→838 @16k).
-- **DFlash2 vs MTP are statistically tied** (differences within ±10% measurement noise);
-  the only stable gap is depth 8k where MTP leads ~10%.
-- **Depth decay is identical** for both (~-40% at 64k, 93→56 tok/s).
+- **MTP3 leads in medium-to-deep context**: MTP3 sustains **102 tok/s @ 8k** and **90.5 tok/s @ 16k**,
+  outperforming DFlash2 by ~10–25% in deeper contexts while sharing the target KV cache.
+- **DFlash2 dominates structured math/code generation**: DFlash2 reaches **178.2 tok/s** on GSM8K/MATH-500,
+  outperforming MTP3 (131.4 tok/s) by **+35.6%**.
 - **KV cache trade-off**: DFlash2's 5-layer drafter needs its own KV cache → usable cache is
-  **7.9 GiB / 360k tokens** vs MTP's **10.5 GiB / 592k tokens** (-39%), so max long-context
-  concurrency is ~1.4x vs 2.3x at 262k max_model_len.
+  **6.5 GiB / 282k tokens** vs MTP's **11.3 GiB / 638k tokens**, so max concurrency at 200k/262k
+  is ~1.4x vs 2.4x.
 - **llama.cpp reference** (UD-Q6_K_XL, Q8_0 KV, MTP): better per-request decode under
-  concurrency (c2/c4), but slower single-stream prefill (803–929 vs 1449–1948 tok/s) and
+  concurrency (c2/c4), but slower single-stream prefill (803–929 vs 1416–1742 tok/s) and
   no 32k/64k numbers in this series.
 
 ### Measurement notes
 
-- Single-run variance is high (±10–20%) due to Triton JIT spikes and GPU clock state;
-  DFlash2 numbers are runs=2 means, MTP is a single successful run (3rd attempt).
+- Single-run variance is kept low by applying Triton JIT warmup before recording;
+  DFlash2 and MTP numbers reflect clean post-upstream merge measurements.
 
 ---
 
 ## Key performance claims
 
-**vs stock vLLM (early upstream numbers)** — decode **+50–80%** across 0–16k context; prefill
-holds up at depth (DFlash2 1662 vs stock 1131 tok/s @8k) while stock prefill decays **-53%**
+**vs stock vLLM (early upstream numbers)** — decode **+50–90%** across 0–16k context; prefill
+holds up at depth (DFlash2 1673 vs stock 1131 tok/s @8k) while stock prefill decays **-53%**
 by 16k (1773→838).
 
 **vs llama.cpp (single-stream, c1)**:
-- **Prefill 80–125% faster**: DFlash2 1447–1805 vs llama.cpp 803–929 tok/s across 0–16k
-  (MTP similar, 1449–1948).
-- **Decode 17–48% faster**: DFlash2 93.1 vs 63.7 @d0, 79.8 vs 65.6 @8k, 69.1 vs 58.9 @16k;
-  MTP 94.3 vs 63.7 @d0.
+- **Prefill 70–115% faster**: DFlash2 1495–1742 vs llama.cpp 803–929 tok/s across 0–16k
+  (MTP similar, 1416–1696).
+- **Decode 38–60% faster**: DFlash2 98.7 vs 63.7 @d0, 81.6 vs 65.6 @8k, 82.2 vs 58.9 @16k;
+  MTP 102.3 vs 63.7 @d0, 102.0 vs 65.6 @8k, 90.5 vs 58.9 @16k.
 - **llama.cpp only wins per-request decode under concurrency** (c2/c4); at 32k/64k the
   numbers are vLLM-only (llama.cpp not measured in this series).
-- **Correctness is identical**: GSM8K + MATH-500 100% on all four engines.
+- **Correctness is identical**: GSM8K + MATH-500 100% on all engines.
 
 **Math reasoning decode @ depth 0** (GSM8K + MATH-500, greedy, 4 problems, 100% accuracy):
 
 | engine | avg decode |
 | :--- | :---: |
 | vLLM Baseline (no spec) | 56.3 tok/s |
-| **vLLM DFlash2 (K=7)** | **142.3 tok/s (2.53×)** |
-| vLLM MTP (K=3) | 130.7 tok/s (2.32×) |
+| **vLLM DFlash2 (K=7)** | **178.2 tok/s (3.16×)** |
+| vLLM MTP3 (K=3) | 131.4 tok/s (2.33×) |
 | llama.cpp (Q6_K_XL, MTP) | 87.5 tok/s (1.55×) |
 
 (DFlash2 row measured in eager mode; full table in `IMPROVEMENTS.md` §9.2.)

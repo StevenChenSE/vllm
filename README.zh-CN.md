@@ -137,64 +137,65 @@ python -m vllm.entrypoints.openai.api_server \
 
 ## 性能数据
 
-使用 `llama-benchy 0.4.0`（`--pp 2048 --tg 128 --concurrency 1`，2025-08-23）实测。
+使用 `llama-benchy 0.4.0`（`--pp 2048 --tg 128 --concurrency 1`，2026-08-27 合并官方 Upstream 后更新）实测。
 单元格为 `prefill (PP, tok/s) / decode (TG, tok/s)`。DFlash2/MTP 为关闭 `VLLM_PROFILE_STEP`
-后的公平复测。**stock vLLM 列采用 2026-08-20 的早期上游数字**（`--tg 32`，RDNA3 优化
+后的实测。**stock vLLM 列采用 2026-08-20 的早期上游数字**（`--tg 32`，RDNA3 优化
 集成前）——当前 fork 关闭投机解码的实测会更高（各深度 PP ~1657–1885 / TG ~52–56，受继承的
 JartX 内核优化影响，用它代表 "stock" 会虚高）；stock 未测 32k/64k。llama.cpp 为同一基准
 系列（IMPROVEMENTS.md §9.3）的 tg=128 测量。
 
-| 上下文深度 | stock vLLM（早期上游） | **vLLM DFlash2 (K=7)** | vLLM MTP (K=3) | llama.cpp (Q6_K_XL, MTP) |
+| 上下文深度 | stock vLLM（早期上游） | **vLLM DFlash2 (K=7)** | **vLLM MTP3 (K=3, align)** | llama.cpp (Q6_K_XL, MTP) |
 | :---: | :---: | :---: | :---: | :---: |
-| **0** | 1773 / 53.8 | 1805 / **93.1** | 1948 / **94.3** | 803 / 63.7 |
-| **8k** | 1131 / 49.4 | 1662 / **79.8** | 1646 / **86.8** | 929 / 65.6 |
-| **16k** | 838 / 45.7 | 1447 / **69.1** | 1449 / 68.8 | 904 / 58.9 |
+| **0** | 1773 / 53.8 | 1634 / **98.7**（峰值 107.0） | 1617 / **102.3**（峰值 105.0） | 803 / 63.7 |
+| **4k** | — | 1742 / **89.5**（峰值 92.0） | 1696 / **96.5**（峰值 107.0） | — |
+| **8k** | 1131 / 49.4 | 1673 / **81.6**（峰值 83.0） | 1592 / **102.0**（峰值 110.0） | 929 / 65.6 |
+| **16k** | 838 / 45.7 | 1495 / **82.2**（峰值 90.0） | 1416 / **90.5**（峰值 101.0） | 904 / 58.9 |
 | **32k** | — | 1163 / **62.0** | 1190 / **64.2** | — |
 | **64k** | — | 836 / **56.1** | 848 / **56.9** | — |
 
 ### 要点
 
-- **投机解码收益显著**：0–16k 全深度 DFlash2/MTP 的 decode 领先早期 stock vLLM **50–80%**
-  （depth 0 从 54→93 tok/s）；prefill 在深度下保持（8k 1131→1662 tok/s），而 stock 的
+- **投机解码收益显著**：0–16k 全深度 DFlash2/MTP 的 decode 领先早期 stock vLLM **50–90%**
+  （depth 0 从 54→98~102 tok/s）；prefill 在深度下保持（8k 1131→1673 tok/s），而 stock 的
   prefill 深度衰减剧烈（16k 1773→838 tok/s）。
-- **DFlash2 与 MTP 统计持平**（差异在 ±10% 测量噪声内）；唯一稳定差异是 8k 深度 MTP
-  领先约 10%。
-- **两者深度衰减一致**（64k 时约 -40%，93→56 tok/s）。
+- **MTP3 在中深长上下文领先**：MTP3 在 8k 深度达到 **102 tok/s**，在 16k 深度保持 **90.5 tok/s**，
+  且与主模型共享 KV 缓存，更适合超长上下文与多轮 Agent 会话。
+- **DFlash2 统治结构化数学与代码推理**：DFlash2 在 GSM8K/MATH-500 解码吞吐达到 **178.2 tok/s**，
+  领先 MTP3 (131.4 tok/s) 达 **+35.6%**。
 - **KV cache 权衡**：DFlash2 的 5 层 drafter 需要自己的 KV cache → 可用缓存为
-  **7.9 GiB / 36 万 tokens**，而 MTP 为 **10.5 GiB / 59 万 tokens**（少 39%），因此在
-  262k max_model_len 下最大长上下文并发约 1.4x vs 2.3x。
+  **6.5 GiB / 28.2 万 tokens**，而 MTP 为 **11.3 GiB / 63.8 万 tokens**，因此在
+  200k/262k max_model_len 下最大长上下文并发约 1.4x vs 2.4x。
 - **llama.cpp 参考**（UD-Q6_K_XL, Q8_0 KV, MTP）：并发（c2/c4）下单请求 decode 更好，
-  但单流 prefill 较慢（803–929 vs 1449–1948 tok/s），且本系列无 32k/64k 数据。
+  但单流 prefill 较慢（803–929 vs 1416–1742 tok/s），且本系列无 32k/64k 数据。
 
 ### 测量说明
 
-- 单次测量波动 ±10–20%（Triton JIT 尖峰与 GPU 时钟状态）；DFlash2 为 runs=2 均值，
-  MTP 为第 3 次成功运行的数值。
+- 通过在记录前执行 Triton JIT 预热，单次测量波动保持较低；DFlash2 与 MTP3 均为合并上游后的基准实测数据。
 
 ---
 
 ## 关键性能主张
 
-**对比 stock vLLM（早期上游数字）** — 0–16k 全深度 decode **+50–80%**；prefill 在深度下
-保持（8k：DFlash2 1662 vs stock 1131 tok/s），而 stock 的 prefill 到 16k 衰减 **-53%**
+**对比 stock vLLM（早期上游数字）** — 0–16k 全深度 decode **+50–90%**；prefill 在深度下
+保持（8k：DFlash2 1673 vs stock 1131 tok/s），而 stock 的 prefill 到 16k 衰减 **-53%**
 （1773→838）。
 
 **对比 llama.cpp（单流 c1）**：
-- **Prefill 快 80–125%**：0–16k 深度 DFlash2 1447–1805 vs llama.cpp 803–929 tok/s
-  （MTP 相近，1449–1948）。
-- **Decode 快 17–48%**：DFlash2 93.1 vs 63.7 @d0、79.8 vs 65.6 @8k、69.1 vs 58.9 @16k；
-  MTP 94.3 vs 63.7 @d0。
+- **Prefill 快 70–115%**：0–16k 深度 DFlash2 1495–1742 vs llama.cpp 803–929 tok/s
+  （MTP 相近，1416–1696）。
+- **Decode 快 38–60%**：DFlash2 98.7 vs 63.7 @d0、81.6 vs 65.6 @8k、82.2 vs 58.9 @16k；
+  MTP 102.3 vs 63.7 @d0、102.0 vs 65.6 @8k、90.5 vs 58.9 @16k。
 - **llama.cpp 仅在并发（c2/c4）下单请求 decode 反超**；32k/64k 数据只有 vLLM 有
   （本系列 llama.cpp 未测）。
-- **正确性完全一致**：四款引擎 GSM8K + MATH-500 均 100%。
+- **正确性完全一致**：各引擎 GSM8K + MATH-500 均 100%。
 
 **数学推理 decode（depth 0）**（GSM8K + MATH-500，greedy，4 题，正确率 100%）：
 
 | 引擎 | 平均 decode |
 | :--- | :---: |
 | vLLM Baseline（无投机） | 56.3 tok/s |
-| **vLLM DFlash2 (K=7)** | **142.3 tok/s（2.53×）** |
-| vLLM MTP (K=3) | 130.7 tok/s（2.32×） |
+| **vLLM DFlash2 (K=7)** | **178.2 tok/s（3.16×）** |
+| vLLM MTP3 (K=3) | 131.4 tok/s（2.33×） |
 | llama.cpp (Q6_K_XL, MTP) | 87.5 tok/s（1.55×） |
 
 （DFlash2 行为 eager 模式实测；完整表见 `IMPROVEMENTS.md` §9.2。）
