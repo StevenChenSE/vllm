@@ -31,6 +31,10 @@ logger = init_logger(__name__)
 
 
 class BaseSpeculator(ABC):
+    def add_request(self, req_state_idx: int) -> None:
+        """Called when a new request is added or reset."""
+        pass
+
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass

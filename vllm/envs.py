@@ -2161,6 +2161,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each entry is VAR_NAME or VAR_NAME:<suffix> (suffix appended to
     # RDMA device name). Must be set together with VLLM_GPU_NIC_PCIE_MAPPING.
     "VLLM_NIC_SELECTION_VARS": lambda: os.getenv("VLLM_NIC_SELECTION_VARS", ""),
+
+    # Adaptive Speculative Decoding (closed-loop EMA acceptance tracking)
+    "VLLM_SPEC_DRAFT_ADAPTIVE": lambda: bool(
+        int(os.getenv("VLLM_SPEC_DRAFT_ADAPTIVE", "0"))
+    ),
+    "VLLM_SPEC_DRAFT_N_MIN": lambda: int(os.getenv("VLLM_SPEC_DRAFT_N_MIN", "1")),
+    "VLLM_SPEC_DRAFT_ALPHA": lambda: float(os.getenv("VLLM_SPEC_DRAFT_ALPHA", "0.25")),
+    "VLLM_SPEC_DRAFT_PROBE": lambda: float(os.getenv("VLLM_SPEC_DRAFT_PROBE", "1.0")),
 }
 
 

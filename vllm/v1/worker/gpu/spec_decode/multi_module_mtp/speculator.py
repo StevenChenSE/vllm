@@ -5,6 +5,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
@@ -14,6 +15,9 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.spec_decode.adaptive_controller import (
+    AdaptiveSpecController,
+)
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     SpeculatorCudaGraphManager,
 )
@@ -38,6 +42,17 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
         self.inputs_embeds: torch.Tensor | None = None
 
+        # Adaptive Speculative Controller (per-sequence online EMA)
+        self.adaptive_controller = AdaptiveSpecController(
+            max_num_reqs=self.max_num_reqs,
+            n_max=self.num_speculative_steps,
+            n_min=envs.VLLM_SPEC_DRAFT_N_MIN,
+            alpha=envs.VLLM_SPEC_DRAFT_ALPHA,
+            probe_step=envs.VLLM_SPEC_DRAFT_PROBE,
+            device=device,
+            enabled=envs.VLLM_SPEC_DRAFT_ADAPTIVE,
+        )
+
         # Input id overrides for the last num_speculative_steps - 1 draft steps.
         # Used by chunked-prefilling requests to swap in the future prefill token
         # for the sampled draft token. Non-chunked-prefilling requests fill the -1
@@ -48,6 +63,11 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dtype=torch.int64,
             device=device,
         )
+
+    def add_request(self, req_state_idx: int) -> None:
+        """Called when a new request is added or reset."""
+        if hasattr(self, "adaptive_controller") and self.adaptive_controller is not None:
+            self.adaptive_controller.reset_request(req_state_idx)
 
         # Cached input ids, embeddings, and target hidden states from the last
         # decode step. Used to re-prefill tokens to update stale KV cache slots
@@ -173,6 +193,14 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         self.input_buffers.query_start_loc[: num_reqs + 1].copy_(
             input_batch.query_start_loc[: num_reqs + 1]
         )
+
+        # Update adaptive controller based on acceptance feedback from previous step
+        if not dummy_run and hasattr(self, "adaptive_controller") and self.adaptive_controller.enabled:
+            self.adaptive_controller.update_acceptance(
+                num_sampled=num_sampled,
+                num_rejected=num_rejected,
+                idx_mapping=input_batch.idx_mapping[:num_reqs],
+            )
 
         self._prepare_inputs(
             last_hidden_states,
@@ -399,7 +427,23 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             use_input_embeds=self.inputs_embeds is not None,
         )
 
-        for step in range(self.num_speculative_steps):
+        if hasattr(self, "adaptive_controller") and self.adaptive_controller.enabled:
+            eff_lens = self.adaptive_controller.get_batch_effective_draft_lengths(
+                idx_mapping,
+                n_max=self.num_speculative_steps,
+                n_min=self.adaptive_controller.n_min,
+            )
+            max_step_limit = int(torch.max(eff_lens).item()) if eff_lens.numel() > 0 else self.num_speculative_steps
+            max_step_limit = max(1, min(self.num_speculative_steps, max_step_limit))
+        else:
+            eff_lens = None
+            max_step_limit = self.num_speculative_steps
+
+        # Initialize draft_tokens to -1 for slots that are skipped
+        if max_step_limit < self.num_speculative_steps:
+            self.draft_tokens[:num_reqs, max_step_limit:].fill_(-1)
+
+        for step in range(max_step_limit):
             # Update the current draft step.
             self.current_draft_step.fill_(step)
 
@@ -425,8 +469,13 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 self.draft_logits,
             )
 
+            if eff_lens is not None:
+                # Mask out requests whose adaptive length budget is already reached
+                active_mask = (eff_lens > step)
+                draft_tokens = torch.where(active_mask, draft_tokens, -1)
+
             self.draft_tokens[:num_reqs, step] = draft_tokens
-            if step < self.num_speculative_steps - 1:
+            if step < max_step_limit - 1:
                 self.hidden_states[:num_tokens] = hidden_states
                 # Mid-prefill requests append the known future prefill token
                 # instead of the sampled draft.

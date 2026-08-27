@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
+import vllm.envs as envs
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -24,6 +25,9 @@ from vllm.v1.worker.gpu.cp_utils import cp_local_slot, prepare_dcp_local_seq_len
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.adaptive_controller import (
+    AdaptiveSpecController,
+)
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
@@ -102,6 +106,22 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
+
+        # Adaptive Speculative Controller
+        self.adaptive_controller = AdaptiveSpecController(
+            max_num_reqs=self.max_num_reqs,
+            n_max=self.num_speculative_steps,
+            n_min=envs.VLLM_SPEC_DRAFT_N_MIN,
+            alpha=envs.VLLM_SPEC_DRAFT_ALPHA,
+            probe_step=envs.VLLM_SPEC_DRAFT_PROBE,
+            device=device,
+            enabled=envs.VLLM_SPEC_DRAFT_ADAPTIVE,
+        )
+
+    def add_request(self, req_state_idx: int) -> None:
+        """Called when a new request is added or reset."""
+        if hasattr(self, "adaptive_controller") and self.adaptive_controller is not None:
+            self.adaptive_controller.reset_request(req_state_idx)
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -274,9 +294,18 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.sample_col[:num_sample],
             self.draft_logits,
         )
-        self.draft_tokens[:num_reqs] = draft_tokens.view(
-            num_reqs, self.num_speculative_steps
-        )
+        reshaped = draft_tokens.view(num_reqs, self.num_speculative_steps)
+        if hasattr(self, "adaptive_controller") and self.adaptive_controller.enabled:
+            eff_lens = self.adaptive_controller.get_batch_effective_draft_lengths(
+                self.idx_mapping[:num_reqs],
+                n_max=self.num_speculative_steps,
+                n_min=self.adaptive_controller.n_min,
+            )
+            for i in range(num_reqs):
+                l_eff = int(eff_lens[i].item())
+                if l_eff < self.num_speculative_steps:
+                    reshaped[i, l_eff:] = -1
+        self.draft_tokens[:num_reqs] = reshaped
 
     def _build_draft_attn_metadata(
         self,
@@ -350,6 +379,14 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.draft_max_seq_len = min(
             max_seq_len + self.num_query_per_req, self.max_model_len
         )
+
+        # Update adaptive controller based on acceptance feedback from previous step
+        if not dummy_run and hasattr(self, "adaptive_controller") and self.adaptive_controller.enabled:
+            self.adaptive_controller.update_acceptance(
+                num_sampled=num_sampled,
+                num_rejected=num_rejected,
+                idx_mapping=input_batch.idx_mapping[:num_reqs],
+            )
 
         # NOTE: To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of input_ids and
