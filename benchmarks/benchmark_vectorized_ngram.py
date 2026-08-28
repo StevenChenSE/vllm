@@ -1,17 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""GPU Triton Vectorized N-Gram (Prompt Lookup) Matcher for Hybrid Speculative Decoding.
-
-Inspired by llama.cpp commit 925e11799 (token ID tracking in KV cell for N-gram lookup).
-Searches context token history using parallel SIMD block matching (N=2..4) and extracts
-following tokens as high-confidence draft candidates in ~20 microseconds.
-"""
-
-from typing import Tuple
+import time
 import torch
 import triton
 import triton.language as tl
-
 
 @triton.jit
 def _vectorized_ngram_lookup_kernel(
@@ -51,7 +42,7 @@ def _vectorized_ngram_lookup_kernel(
     best_match_pos = -1
     best_match_n = 0
 
-    # Test N-gram from max down to min (e.g. 4, 3, 2)
+    # Test N-gram from max down to min (e.g. 3, 2)
     for n in range(max_ngram, min_ngram - 1, -1):
         if total_len > n and best_match_pos < 0:
             suffix_0 = tl.load(token_base + total_len - n)
@@ -60,8 +51,9 @@ def _vectorized_ngram_lookup_kernel(
             suffix_3 = tl.load(token_base + total_len - n + 3) if n >= 4 else 0
 
             scan_end = total_len - n
+            # Vectorized block loop: process BLOCK_SIZE candidate positions in parallel!
+            # Loop backwards in blocks from scan_end down to search_start
             num_blocks = tl.cdiv(scan_end - search_start, BLOCK_SIZE)
-            # Scan backwards in vectorized blocks (latest occurrence first)
             for b in range(num_blocks - 1, -1, -1):
                 if best_match_pos < 0:
                     b_start = search_start + b * BLOCK_SIZE
@@ -81,8 +73,10 @@ def _vectorized_ngram_lookup_kernel(
                         t3 = tl.load(token_base + offs + 3, mask=mask, other=-999999)
                         m0 = m0 & (t3 == suffix_3)
 
-                    # If match found in block, select highest index
+                    # Check if any position in the block matched
                     if tl.sum(m0.to(tl.int32)) > 0:
+                        # Find the highest index (most recent) matching position
+                        # Replace non-matches with -1
                         match_positions = tl.where(m0, offs, -1)
                         best_in_block = tl.max(match_positions, axis=0)
                         if best_in_block >= 0:
@@ -111,63 +105,54 @@ def _vectorized_ngram_lookup_kernel(
             tl.store(out_base + k, -1)
 
 
-class NgramLookupModule:
-    """Fast GPU-resident vectorized N-gram matcher for speculative drafting."""
+def bench_vectorized():
+    device = torch.device("cuda:0")
+    batch_size = 8
+    max_spec_tokens = 7
+    seq_len = 4096
 
-    def __init__(
-        self,
-        max_num_reqs: int,
-        max_spec_tokens: int,
-        min_ngram: int = 2,
-        max_ngram: int = 4,
-        max_history_search: int = 4096,
-        device: torch.device = torch.device("cuda"),
-    ):
-        self.max_num_reqs = max_num_reqs
-        self.max_spec_tokens = max_spec_tokens
-        self.min_ngram = min_ngram
-        self.max_ngram = max_ngram
-        self.max_history_search = max_history_search
-        self.device = device
+    ngram_draft_tokens = torch.full((batch_size, max_spec_tokens), -1, dtype=torch.int64, device=device)
+    ngram_match_lens = torch.zeros((batch_size,), dtype=torch.int32, device=device)
 
-        self.ngram_draft_tokens = torch.full(
-            (max_num_reqs, max_spec_tokens), -1, dtype=torch.int64, device=device
-        )
-        self.ngram_match_lens = torch.zeros(
-            (max_num_reqs,), dtype=torch.int32, device=device
-        )
+    all_tokens = torch.randint(0, 50000, (batch_size, seq_len), dtype=torch.int32, device=device)
+    all_tokens[:, 1000:1003] = all_tokens[:, seq_len-3:seq_len]
+    total_lens = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
+    idx_mapping = torch.arange(batch_size, dtype=torch.int64, device=device)
 
-    def lookup(
-        self,
-        all_token_ids: torch.Tensor,
-        total_lens: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        num_reqs: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Perform parallel N-gram search across all active requests in the batch.
-
-        Returns:
-            ngram_draft: [num_reqs, max_spec_tokens] tensor of candidate token IDs
-            match_lens: [num_reqs] count of valid matching tokens (0 if no match)
-        """
-        if num_reqs <= 0:
-            return self.ngram_draft_tokens[:0], self.ngram_match_lens[:0]
-
-        grid = (num_reqs,)
+    def run_kernel():
+        grid = (batch_size,)
         _vectorized_ngram_lookup_kernel[grid](
-            all_token_ids,
-            all_token_ids.stride(0),
+            all_tokens,
+            all_tokens.stride(0),
             total_lens,
             idx_mapping,
-            self.ngram_draft_tokens,
-            self.ngram_draft_tokens.stride(0),
-            self.ngram_match_lens,
-            num_reqs=num_reqs,
-            max_spec_tokens=self.max_spec_tokens,
-            min_ngram=self.min_ngram,
-            max_ngram=self.max_ngram,
-            max_history_search=self.max_history_search,
+            ngram_draft_tokens,
+            ngram_draft_tokens.stride(0),
+            ngram_match_lens,
+            num_reqs=batch_size,
+            max_spec_tokens=max_spec_tokens,
+            min_ngram=2,
+            max_ngram=4,
+            max_history_search=4096,
             BLOCK_SIZE=256,
         )
 
-        return self.ngram_draft_tokens[:num_reqs], self.ngram_match_lens[:num_reqs]
+    # Warmup
+    for _ in range(10):
+        run_kernel()
+    torch.cuda.synchronize()
+
+    t0 = time.perf_counter()
+    iters = 1000
+    for _ in range(iters):
+        run_kernel()
+    torch.cuda.synchronize()
+    t1 = time.perf_counter()
+
+    us_per_call = (t1 - t0) / iters * 1e6
+    print(f"Vectorized Ngram lookup latency for batch_size={batch_size}, seq_len={seq_len}: {us_per_call:.2f} μs")
+    print(f"Match lens: {ngram_match_lens.tolist()}")
+    print(f"Draft tokens (row 0): {ngram_draft_tokens[0].tolist()}")
+
+if __name__ == "__main__":
+    bench_vectorized()
