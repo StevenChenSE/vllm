@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-import sys
 from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
@@ -137,8 +136,10 @@ class DFlash2Speculator(DFlashSpeculator):
         super().__init__(vllm_config, device)
         draft_config = self.draft_model_config.hf_config.dflash_config or {}
         self.selector_top_k = int(draft_config.get("selector_top_k", 16))
-        self.p_min = float(os.getenv("DFLASH_P_MIN", draft_config.get("p_min", 0.0)))
-        self.n_min = int(os.getenv("DFLASH_N_MIN", draft_config.get("n_min", 0)))
+        p_min_env = envs.DFLASH_P_MIN
+        self.p_min = p_min_env if p_min_env >= 0.0 else float(draft_config.get("p_min", 0.0))
+        n_min_env = envs.DFLASH_N_MIN
+        self.n_min = n_min_env if n_min_env >= 0 else int(draft_config.get("n_min", 0))
         self._anchor_indices = (
             torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
             * self.num_query_per_req

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import sys
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -97,6 +96,35 @@ def _grouped_conv(
     group_size: int,
     taps: int,
 ) -> torch.Tensor:
+    N = hidden_states.shape[0]
+    hidden_size = num_groups * group_size
+    if (
+        taps == 2
+        and hidden_states.is_cuda
+        and hidden_states.shape[-1] == hidden_size
+        and hidden_states.is_contiguous()
+        and base.is_contiguous()
+    ):
+        output = torch.empty_like(hidden_states)
+        BLOCK_N = 32
+        grid = (triton.cdiv(N, BLOCK_N), num_groups)
+        _grouped_conv_fused_kernel[grid](
+            hidden_states,
+            delta,
+            base,
+            output,
+            N,
+            delta.stride(0),
+            delta.stride(1),
+            delta.stride(2),
+            num_groups=num_groups,
+            group_size=group_size,
+            hidden_size=hidden_size,
+            block_size=block_size,
+            BLOCK_N=BLOCK_N,
+        )
+        return output
+
     blocks = hidden_states.unflatten(-1, (num_groups, group_size))
     coefficients = base.view(1, taps, num_groups, group_size) + delta.unsqueeze(-1)
     output = coefficients[:, 0] * blocks

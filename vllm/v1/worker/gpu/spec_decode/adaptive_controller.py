@@ -31,7 +31,7 @@ class AdaptiveSpecController:
         self.n_min = max(1, n_min)
         self.alpha = alpha
         self.probe_step = probe_step
-        self.init_val = init_val if init_val is not None else float(self.n_min + 1)
+        self.init_val = init_val if init_val is not None else float(self.n_max)
         self.device = device
         self.enabled = enabled
 
@@ -84,7 +84,12 @@ class AdaptiveSpecController:
             if n_drafted <= 0:
                 continue
 
-            n_accepted = max(0, int(num_sampled[i].item()) - 1)
+            sampled_cnt = int(num_sampled[i].item())
+            if sampled_cnt == 0:
+                # Chunked prefill step: skip updating decode acceptance EMA
+                continue
+
+            n_accepted = max(0, sampled_cnt - 1)
             current_ema = float(self.acc_ema[req_idx].item())
 
             if n_accepted >= n_drafted:
@@ -141,5 +146,7 @@ class AdaptiveSpecController:
         eff_lens = torch.clamp(torch.round(ema_vals).to(torch.int32), cur_min, cur_max)
         eff_lens = torch.where(valid_mask, eff_lens, cur_max)
 
-        self.last_draft_len[safe_indices] = torch.where(valid_mask, eff_lens, 0)
+        valid_indices = safe_indices[valid_mask]
+        if valid_indices.numel() > 0:
+            self.last_draft_len[valid_indices] = eff_lens[valid_mask]
         return eff_lens

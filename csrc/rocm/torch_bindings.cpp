@@ -1,7 +1,7 @@
 #include "ops.h"
 #include "core/registration.h"
 
-TORCH_LIBRARY_EXPAND(_rocm_C, rocm_ops) {
+TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
 #ifndef VLLM_SKIP_SKINNY_GEMMS
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(

@@ -1205,6 +1205,9 @@ class SpeculativeConfig:
                     trust_remote_code=self.target_model_config.trust_remote_code,
                     allowed_local_media_path=self.target_model_config.allowed_local_media_path,
                     allowed_media_domains=self.target_model_config.allowed_media_domains,
+                    # Use "auto" so the draft model resolves its own parameter dtype
+                    # (e.g., quantized W4A16 or native BF16 drafters) rather than being forced
+                    # to match the target model's potentially different quantization/dtype.
                     dtype="auto",
                     seed=self.target_model_config.seed,
                     revision=self.revision,

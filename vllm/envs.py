@@ -2177,6 +2177,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SPEC_NGRAM_MIN": lambda: int(os.getenv("VLLM_SPEC_NGRAM_MIN", "2")),
     "VLLM_SPEC_NGRAM_MAX": lambda: int(os.getenv("VLLM_SPEC_NGRAM_MAX", "4")),
     "VLLM_SPEC_NGRAM_HISTORY": lambda: int(os.getenv("VLLM_SPEC_NGRAM_HISTORY", "4096")),
+
+    # DFlash Profiling & Tuning
+    "VLLM_PROFILE_DFLASH": lambda: os.getenv("VLLM_PROFILE_DFLASH") == "1",
+    "DFLASH_P_MIN": lambda: float(os.getenv("DFLASH_P_MIN", "-1.0")),
+    "DFLASH_N_MIN": lambda: int(os.getenv("DFLASH_N_MIN", "-1")),
 }
 
 

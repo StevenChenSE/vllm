@@ -135,6 +135,9 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         self._cur_all_token_ids: torch.Tensor | None = None
         self._cur_total_lens: torch.Tensor | None = None
+        self._step_indices: torch.Tensor = torch.arange(
+            self.num_speculative_steps, device=device
+        )
 
     def add_request(self, req_state_idx: int) -> None:
         """Called when a new request is added or reset."""
@@ -313,15 +316,22 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.draft_logits,
         )
         reshaped = draft_tokens.view(num_reqs, self.num_speculative_steps)
+        self.draft_tokens[:num_reqs] = reshaped
+
+    def _postprocess_draft_tokens(self, num_reqs: int) -> None:
+        reshaped = self.draft_tokens[:num_reqs]
+        skip_mask = None
         if hasattr(self, "adaptive_controller") and self.adaptive_controller.enabled:
             eff_lens = self.adaptive_controller.get_batch_effective_draft_lengths(
                 self.idx_mapping[:num_reqs],
                 n_max=self.num_speculative_steps,
                 n_min=self.adaptive_controller.n_min,
             )
-            step_indices = torch.arange(
-                self.num_speculative_steps, device=reshaped.device
-            )
+            step_indices = getattr(self, "_step_indices", None)
+            if step_indices is None:
+                step_indices = torch.arange(
+                    self.num_speculative_steps, device=reshaped.device
+                )
             skip_mask = step_indices[None, :] >= eff_lens[:, None]
             reshaped.masked_fill_(skip_mask, -1)
 
@@ -338,16 +348,18 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.idx_mapping[:num_reqs],
                 num_reqs,
             )
-            step_indices = torch.arange(
-                self.num_speculative_steps, device=reshaped.device
-            )
+            step_indices = getattr(self, "_step_indices", None)
+            if step_indices is None:
+                step_indices = torch.arange(
+                    self.num_speculative_steps, device=reshaped.device
+                )
             ngram_valid_mask = (
                 step_indices[None, :] < ngram_match_lens[:, None]
             ) & (ngram_drafts >= 0)
             reshaped = torch.where(ngram_valid_mask, ngram_drafts, reshaped)
 
             # Re-apply adaptive ceiling mask if active
-            if hasattr(self, "adaptive_controller") and self.adaptive_controller.enabled:
+            if skip_mask is not None:
                 reshaped.masked_fill_(skip_mask, -1)
 
         self.draft_tokens[:num_reqs] = reshaped
@@ -422,6 +434,9 @@ class DFlashSpeculator(DraftModelSpeculator):
         self._cur_all_token_ids = all_token_ids
         self._cur_total_lens = total_lens
         num_reqs = input_batch.num_reqs
+        self.idx_mapping[:num_reqs].copy_(input_batch.idx_mapping[:num_reqs])
+        if num_reqs < self.max_num_reqs:
+            self.idx_mapping[num_reqs:].fill_(-1)
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
@@ -512,7 +527,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         # because the context shape varies per step. During dummy runs the block tables
         # are placeholders, so we skip the cache write to avoid clobbering real entries.
         # Each layer uses the context slots of its own kv-cache group.
-        do_dflash_prof = os.environ.get("VLLM_PROFILE_DFLASH") == "1"
+        do_dflash_prof = envs.VLLM_PROFILE_DFLASH
         if do_dflash_prof:
             torch.cuda.synchronize()
             t_kv_start = time.perf_counter()
@@ -525,10 +540,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             ]
         else:
             context_slots = self._context_slot_mappings[0][:num_target_tokens]
-        # Slicing context_slots, hidden_states, and context_positions to match the most recent sliding_window tokens:
-        # Avoids slicing mismatch and eliminates out-of-window pointer lookups & OOB GPU memory faults
+        # Slicing context_slots, hidden_states, and context_positions per-request to match sliding_window:
         max_sw = getattr(self.draft_model_config.hf_config, "sliding_window", None)
-        if max_sw is not None and num_target_tokens > max_sw:
+        if max_sw is not None and num_reqs == 1 and num_target_tokens > max_sw:
             ctx_hidden_states = self.hidden_states[num_target_tokens - max_sw : num_target_tokens]
             ctx_positions = self.context_positions[num_target_tokens - max_sw : num_target_tokens]
             if context_slots is not None:
@@ -539,6 +553,41 @@ class DFlashSpeculator(DraftModelSpeculator):
                     ]
                 else:
                     context_slots = context_slots[-max_sw:]
+        elif max_sw is not None and num_reqs > 1:
+            q_start = input_batch.query_start_loc[: num_reqs + 1]
+            needs_slice = False
+            for r in range(num_reqs):
+                if int((q_start[r + 1] - q_start[r]).item()) > max_sw:
+                    needs_slice = True
+                    break
+            if needs_slice:
+                selected_indices = []
+                for r in range(num_reqs):
+                    start = int(q_start[r].item())
+                    end = int(q_start[r + 1].item())
+                    req_len = end - start
+                    if req_len > max_sw:
+                        selected_indices.extend(range(end - max_sw, end))
+                    else:
+                        selected_indices.extend(range(start, end))
+                sel = torch.tensor(
+                    selected_indices,
+                    device=self.hidden_states.device,
+                    dtype=torch.int64,
+                )
+                ctx_hidden_states = self.hidden_states[sel]
+                ctx_positions = self.context_positions[sel]
+                if context_slots is not None:
+                    if isinstance(context_slots, (list, tuple)):
+                        context_slots = [
+                            cs[sel] if cs is not None else None
+                            for cs in context_slots
+                        ]
+                    else:
+                        context_slots = context_slots[sel]
+            else:
+                ctx_hidden_states = self.hidden_states[:num_target_tokens]
+                ctx_positions = self.context_positions[:num_target_tokens]
         else:
             ctx_hidden_states = self.hidden_states[:num_target_tokens]
             ctx_positions = self.context_positions[:num_target_tokens]
@@ -605,6 +654,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             torch.cuda.synchronize()
             t_cg_ms = (time.perf_counter() - t_cg_start) * 1000.0
             print(f"[DFLASH_DETAILED] precompute_kv={t_kv_ms:5.2f}ms | cudagraph_replay={t_cg_ms:5.2f}ms", flush=True)
+
+        # Apply Adaptive Draft Length Masking & Hybrid N-Gram Fusion post-generation
+        # (executed post-graph, making it 100% graph-capture safe for both eager and FULL CG replay)
+        self._postprocess_draft_tokens(num_reqs)
 
         return self.draft_tokens[:num_reqs]
 
