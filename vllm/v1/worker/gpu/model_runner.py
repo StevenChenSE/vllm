@@ -1936,6 +1936,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     all_token_ids=self.req_states.all_token_ids.gpu,
                     total_lens=self.req_states.total_len.gpu,
                 )
+            if not getattr(self.speculator, "supports_mm_inputs", False) and self.encoder_cache is not None:
+                for i, req_id in enumerate(input_batch.req_ids):
+                    if len(self.encoder_cache.mm_features.get(req_id, [])) > 0:
+                        draft_tokens[i].fill_(-1)
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
