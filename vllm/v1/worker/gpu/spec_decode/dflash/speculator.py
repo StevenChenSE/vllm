@@ -30,6 +30,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_controller import (
 )
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
+from vllm.v1.worker.gpu.spec_decode.ngram_lookup import NgramLookupModule
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 from vllm.v1.worker.utils import AttentionGroup
@@ -117,6 +118,23 @@ class DFlashSpeculator(DraftModelSpeculator):
             device=device,
             enabled=envs.VLLM_SPEC_DRAFT_ADAPTIVE,
         )
+
+        # Hybrid N-Gram (Prompt Lookup) Proposer
+        self.ngram_lookup = (
+            NgramLookupModule(
+                max_num_reqs=self.max_num_reqs,
+                max_spec_tokens=self.num_speculative_steps,
+                min_ngram=envs.VLLM_SPEC_NGRAM_MIN,
+                max_ngram=envs.VLLM_SPEC_NGRAM_MAX,
+                max_history_search=envs.VLLM_SPEC_NGRAM_HISTORY,
+                device=device,
+            )
+            if envs.VLLM_SPEC_HYBRID_NGRAM
+            else None
+        )
+
+        self._cur_all_token_ids: torch.Tensor | None = None
+        self._cur_total_lens: torch.Tensor | None = None
 
     def add_request(self, req_state_idx: int) -> None:
         """Called when a new request is added or reset."""
@@ -306,6 +324,32 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
             skip_mask = step_indices[None, :] >= eff_lens[:, None]
             reshaped.masked_fill_(skip_mask, -1)
+
+        # Hybrid N-Gram (Prompt Lookup) Fusion:
+        # Override high-confidence matching prefix tokens from context history
+        if (
+            self.ngram_lookup is not None
+            and self._cur_all_token_ids is not None
+            and self._cur_total_lens is not None
+        ):
+            ngram_drafts, ngram_match_lens = self.ngram_lookup.lookup(
+                self._cur_all_token_ids,
+                self._cur_total_lens,
+                self.idx_mapping[:num_reqs],
+                num_reqs,
+            )
+            step_indices = torch.arange(
+                self.num_speculative_steps, device=reshaped.device
+            )
+            ngram_valid_mask = (
+                step_indices[None, :] < ngram_match_lens[:, None]
+            ) & (ngram_drafts >= 0)
+            reshaped = torch.where(ngram_valid_mask, ngram_drafts, reshaped)
+
+            # Re-apply adaptive ceiling mask if active
+            if hasattr(self, "adaptive_controller") and self.adaptive_controller.enabled:
+                reshaped.masked_fill_(skip_mask, -1)
+
         self.draft_tokens[:num_reqs] = reshaped
 
     def _build_draft_attn_metadata(
@@ -372,7 +416,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        all_token_ids: torch.Tensor | None = None,
+        total_lens: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        self._cur_all_token_ids = all_token_ids
+        self._cur_total_lens = total_lens
         num_reqs = input_batch.num_reqs
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req

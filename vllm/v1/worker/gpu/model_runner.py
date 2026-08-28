@@ -1933,6 +1933,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.sampler.sampling_states.seeds.gpu,
                     dp_sync=dp_sync,
                     mm_inputs=mm_inputs,
+                    all_token_ids=self.req_states.all_token_ids.gpu,
+                    total_lens=self.req_states.total_len.gpu,
                 )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
