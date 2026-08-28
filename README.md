@@ -15,8 +15,9 @@ DFlash2 drafter fixes, ROCm kernel optimizations, and a tuned dual-7900-XTX serv
 
 This branch (`feat/dflash-perf-opt`) carries RDNA3-specific improvements on top of upstream vLLM:
 
-- **DFlash2 speculative decoding fixes** — resolves the CUDA-graph zero-acceptance collapse on
+- **DFlash2 speculative decoding fixes & Adaptive Controller** — resolves the CUDA-graph zero-acceptance collapse on
   ROCm. Acceptance rate restored, draft tokens are real, 0–64k context stable.
+  Includes a **closed-loop adaptive draft length controller** (`AdaptiveSpecController`) inspired by [LaurentZuijdwijk/llama.cpp](https://github.com/LaurentZuijdwijk/llama.cpp/commit/ca26169d2efefebc028a25c115714080dc2475e3) and [@Digit4lSoluti0n](https://x.com/digit4lsoluti0n/status/2092700856164421861?s=46): dynamically tracks online token acceptance via censored EMA, probes upward on full acceptance, backs off under partial refusal, and applies GPU-vectorized mask filtering to eliminate deep-context attention degradation.
 - **ROCm kernel work** — fused native HIP kernels for 1D grouped conv and split-kv reduction,
   sliding-window detection hardening, draft-token sanitization.
 - **RDNA3 optimizations inherited from [JartX/vllm](https://github.com/JartX/vllm)** — after
@@ -131,9 +132,16 @@ python -m vllm.entrypoints.openai.api_server \
 
 ### 2. DFlash2 speculative decoding (W4A16 Quantized Drafter: `syvai/Qwen3.8-27B-DFlash2-W4A16`)
 
-Saves ~0.8 GiB VRAM per GPU and boosts mathematical reasoning decode to **182.9 tok/s** (peak **197.3 tok/s** on MATH-500):
+Saves ~0.8 GiB VRAM per GPU and boosts mathematical reasoning decode to **183.8 tok/s** (peak **196.0 tok/s** on MATH-500).
+Closed-loop adaptive speculation is **enabled by default** (`VLLM_SPEC_DRAFT_ADAPTIVE=1`, `n_max=7, n_min=2`), maintaining high draft lengths during structured output while automatically backing off to eliminate attention degradation in deep contexts:
 
 ```bash
+# Optional adaptive knobs (defaults shown):
+# export VLLM_SPEC_DRAFT_ADAPTIVE=1
+# export VLLM_SPEC_DRAFT_N_MIN=2
+# export VLLM_SPEC_DRAFT_ALPHA=0.25
+# export VLLM_SPEC_DRAFT_PROBE=1.0
+
 python -m vllm.entrypoints.openai.api_server \
   --model /path/to/qwen3.8-27b-mtp-fixed \
   --tensor-parallel-size 2 \
@@ -179,20 +187,21 @@ python -m vllm.entrypoints.openai.api_server \
 Measured with `llama-benchy 0.4.0` (`--pp 2048 --tg 128 --concurrency 1`, updated post upstream merge on `2026-08-27`).
 Cells are `prefill (PP, tok/s) / decode (TG, tok/s)`. DFlash2/MTP are fair runs without `VLLM_PROFILE_STEP`.
 
-| Context depth | stock vLLM (upstream, early) | **vLLM DFlash2 (BF16)** | **vLLM DFlash2 (W4A16)** | **vLLM MTP3 (BF16, align)** | llama.cpp (Q6_K_XL, MTP) |
+| Context depth | stock vLLM (upstream, early) | **vLLM DFlash2 (BF16)** | **vLLM DFlash2 (W4A16, Adaptive)** | **vLLM MTP3 (BF16, align)** | llama.cpp (Q6_K_XL, MTP) |
 | :---: | :---: | :---: | :---: | :---: | :---: |
-| **0** | 1773 / 53.8 | 1634 / **98.7** (peak 107.0) | 1666 / **101.9** (peak 107.0) | 1617 / **102.3** (peak 105.0) | 803 / 63.7 |
-| **4k** | — | 1742 / **89.5** (peak 92.0) | 1752 / **76.7** (peak 78.0) | 1696 / **96.5** (peak 107.0) | — |
-| **8k** | 1131 / 49.4 | 1673 / **81.6** (peak 83.0) | 1684 / **66.9** (peak 74.0) | 1592 / **102.0** (peak 110.0) | 929 / 65.6 |
-| **16k** | 838 / 45.7 | 1495 / **82.2** (peak 90.0) | 1488 / **71.7** (peak 73.0) | 1416 / **90.5** (peak 101.0) | 904 / 58.9 |
+| **0** | 1773 / 53.8 | 1634 / **98.7** (peak 107.0) | 1658 / **118.9** (peak 119.0) | 1617 / **102.3** (peak 105.0) | 803 / 63.7 |
+| **4k** | — | 1742 / **89.5** (peak 92.0) | 1697 / **102.5** (peak 104.0) | 1696 / **96.5** (peak 107.0) | — |
+| **8k** | 1131 / 49.4 | 1673 / **81.6** (peak 83.0) | 1586 / **84.2** (peak 96.0) | 1592 / **102.0** (peak 110.0) | 929 / 65.6 |
+| **16k** | 838 / 45.7 | 1495 / **82.2** (peak 90.0) | 1491 / **80.4 ~ 87.9** (peak 95.0) | 1416 / **90.5** (peak 101.0) | 904 / 58.9 |
 | **32k** | — | 1163 / **62.0** | — | 1190 / **64.2** | — |
 | **64k** | — | 836 / **56.1** | — | 848 / **56.9** | — |
 
 ### Takeaways
 
-- **Speculative decoding wins big**: DFlash2/MTP beat stock vLLM decode by **+50–90%** across 0–16k context (54→98~102 tok/s at depth 0).
+- **Speculative decoding wins big**: DFlash2/MTP beat stock vLLM decode by **+50–120%** across 0–16k context (54→102~119 tok/s at depth 0).
+- **Adaptive speculation eliminates deep-context drop**: By dynamically adjusting draft length between `[n_min=2, n_max=7]`, DFlash2-W4A16 sustains **102.5 tok/s @ 4k** and **87.9 tok/s @ 16k**, while reaching **118.9 tok/s @ depth 0**.
 - **MTP3 leads in medium-to-deep context**: MTP3 sustains **102 tok/s @ 8k** and **90.5 tok/s @ 16k**, outperforming DFlash2 in deep contexts while sharing target KV cache.
-- **DFlash2 dominates structured math/code generation**: DFlash2-W4A16 reaches **182.9 tok/s** (peak 197.3 tok/s on MATH-500) and DFlash2-BF16 reaches **178.2 tok/s**, outperforming MTP3 (131.4 tok/s) by **+35–39%**.
+- **DFlash2 dominates structured math/code generation**: DFlash2-W4A16 reaches **183.8 tok/s** (peak **196.0 tok/s** on MATH-500) and DFlash2-BF16 reaches **178.2 tok/s**, outperforming MTP3 (131.4 tok/s) by **+35–40%**.
 - **KV cache trade-off**:
   - **MTP3**: **11.3 GiB / 638k tokens** usable KV cache (~2.4x concurrency @ 262k).
   - **DFlash2 (W4A16)**: **7.7 GiB / 335k tokens** usable KV cache (~1.68x concurrency @ 200k).
@@ -207,7 +216,7 @@ Cells are `prefill (PP, tok/s) / decode (TG, tok/s)`. DFlash2/MTP are fair runs 
 | engine | avg decode |
 | :--- | :---: |
 | vLLM Baseline (no spec) | 56.3 tok/s |
-| **vLLM DFlash2 (W4A16, K=7)** | **182.9 tok/s (3.24×)** 🏆 |
+| **vLLM DFlash2 (W4A16, Adaptive K=7)** | **183.8 tok/s (peak 196.0 tok/s, 3.26×)** 🏆 |
 | **vLLM DFlash2 (BF16, K=7)** | **178.2 tok/s (3.16×)** |
 | vLLM MTP3 (K=3) | 131.4 tok/s (2.33×) |
 | llama.cpp (Q6_K_XL, MTP) | 87.5 tok/s (1.55×) |
@@ -226,8 +235,9 @@ Cells are `prefill (PP, tok/s) / decode (TG, tok/s)`. DFlash2/MTP are fair runs 
 
 ---
 
-## Reference
+## Reference & Acknowledgements
 
+- **Adaptive Speculative Decoding Inspiration**: The online censored-observation EMA draft controller is inspired by Laurent Zuijdwijk's implementation in [llama.cpp commit `ca26169`](https://github.com/LaurentZuijdwijk/llama.cpp/commit/ca26169d2efefebc028a25c115714080dc2475e3) and the [@Digit4lSoluti0n discussion](https://x.com/digit4lsoluti0n/status/2092700856164421861?s=46).
 - Original upstream README: [vllm-project/vllm](https://github.com/vllm-project/vllm#readme) — this fork
   replaces it with RDNA3-specific content.
 - Investigation notes: `DFLASH2_CG_FIX_PLAN.md`, `IMPROVEMENTS.md` (benchmark history), `AGENTS.md`

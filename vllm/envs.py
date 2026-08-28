@@ -2164,9 +2164,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Adaptive Speculative Decoding (closed-loop EMA acceptance tracking)
     "VLLM_SPEC_DRAFT_ADAPTIVE": lambda: bool(
-        int(os.getenv("VLLM_SPEC_DRAFT_ADAPTIVE", "0"))
+        int(os.getenv("VLLM_SPEC_DRAFT_ADAPTIVE", "1"))
     ),
-    "VLLM_SPEC_DRAFT_N_MIN": lambda: int(os.getenv("VLLM_SPEC_DRAFT_N_MIN", "1")),
+    "VLLM_SPEC_DRAFT_N_MIN": lambda: int(os.getenv("VLLM_SPEC_DRAFT_N_MIN", "2")),
     "VLLM_SPEC_DRAFT_ALPHA": lambda: float(os.getenv("VLLM_SPEC_DRAFT_ALPHA", "0.25")),
     "VLLM_SPEC_DRAFT_PROBE": lambda: float(os.getenv("VLLM_SPEC_DRAFT_PROBE", "1.0")),
 }

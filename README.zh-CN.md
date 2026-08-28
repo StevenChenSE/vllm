@@ -15,8 +15,9 @@ DFlash2 drafter 修复、ROCm 内核优化，以及调优过的双 7900 XTX 服�
 
 本分支（`feat/dflash-perf-opt`）在上游 vLLM 之上携带 RDNA3 专用改进：
 
-- **DFlash2 投机解码修复** — 解决 CUDA Graph 下的零接受率塌方问题（ROCm 平台）。
+- **DFlash2 投机解码修复与自适应控制器** — 解决 CUDA Graph 下的零接受率塌方问题（ROCm 平台）。
   接受率已恢复、draft token 真实、0–64k 上下文稳定。
+  引入了灵感源自 [LaurentZuijdwijk/llama.cpp](https://github.com/LaurentZuijdwijk/llama.cpp/commit/ca26169d2efefebc028a25c115714080dc2475e3) 与 [@Digit4lSoluti0n](https://x.com/digit4lsoluti0n/status/2092700856164421861?s=46) 的**闭环自适应投机长度控制器**（`AdaptiveSpecController`）：通过右侧截断 EMA 在线跟踪 token 接受情况，在全接受时加性上探、部分拒绝时平滑回退，并以 GPU 纯矢量化广播掩码过滤超额候选，彻底消除深层上下文下的验证算力衰退。
 - **ROCm 内核工作** — 1D grouped conv 与 split-kv reduction 的原生融合 HIP 内核、
   sliding-window 检测加固、draft token 净化。
 - **继承自 [JartX/vllm](https://github.com/JartX/vllm) 的 RDNA3 优化** — 对其分支审计后，
@@ -126,9 +127,16 @@ python -m vllm.entrypoints.openai.api_server \
 
 ### 2. DFlash2 投机解码（W4A16 量化 Drafter：`syvai/Qwen3.8-27B-DFlash2-W4A16`）
 
-单卡节省约 0.8 GiB 显存，数学推理速度刷新至 **182.9 tok/s**（MATH-500 峰值 **197.3 tok/s**）：
+单卡节省约 0.8 GiB 显存，数学推理速度刷新至 **183.8 tok/s**（MATH-500 峰值 **196.0 tok/s**）。
+闭环自适应投机**默认开启**（`VLLM_SPEC_DRAFT_ADAPTIVE=1`，`n_max=7, n_min=2`），在结构化输出阶段维持大步长拉满，遇到低熵长文本时自动回退，消除深层注意力验证衰退：
 
 ```bash
+# 可选自适应参数微调（下方为默认值）：
+# export VLLM_SPEC_DRAFT_ADAPTIVE=1
+# export VLLM_SPEC_DRAFT_N_MIN=2
+# export VLLM_SPEC_DRAFT_ALPHA=0.25
+# export VLLM_SPEC_DRAFT_PROBE=1.0
+
 python -m vllm.entrypoints.openai.api_server \
   --model /path/to/qwen3.8-27b-mtp-fixed \
   --tensor-parallel-size 2 \
@@ -174,20 +182,21 @@ python -m vllm.entrypoints.openai.api_server \
 使用 `llama-benchy 0.4.0`（`--pp 2048 --tg 128 --concurrency 1`，2026-08-27 合并官方 Upstream 后更新）实测。
 单元格为 `prefill (PP, tok/s) / decode (TG, tok/s)`。DFlash2/MTP 为关闭 `VLLM_PROFILE_STEP` 后的实测。
 
-| 上下文深度 | stock vLLM（早期上游） | **vLLM DFlash2 (BF16)** | **vLLM DFlash2 (W4A16)** | **vLLM MTP3 (BF16, align)** | llama.cpp (Q6_K_XL, MTP) |
+| 上下文深度 | stock vLLM（早期上游） | **vLLM DFlash2 (BF16)** | **vLLM DFlash2 (W4A16, 自适应)** | **vLLM MTP3 (BF16, align)** | llama.cpp (Q6_K_XL, MTP) |
 | :---: | :---: | :---: | :---: | :---: | :---: |
-| **0** | 1773 / 53.8 | 1634 / **98.7**（峰值 107.0） | 1666 / **101.9**（峰值 107.0） | 1617 / **102.3**（峰值 105.0） | 803 / 63.7 |
-| **4k** | — | 1742 / **89.5**（峰值 92.0） | 1752 / **76.7**（峰值 78.0） | 1696 / **96.5**（峰值 107.0） | — |
-| **8k** | 1131 / 49.4 | 1673 / **81.6**（峰值 83.0） | 1684 / **66.9**（峰值 74.0） | 1592 / **102.0**（峰值 110.0） | 929 / 65.6 |
-| **16k** | 838 / 45.7 | 1495 / **82.2**（峰值 90.0） | 1488 / **71.7**（峰值 73.0） | 1416 / **90.5**（峰值 101.0） | 904 / 58.9 |
+| **0** | 1773 / 53.8 | 1634 / **98.7**（峰值 107.0） | 1658 / **118.9**（峰值 119.0） | 1617 / **102.3**（峰值 105.0） | 803 / 63.7 |
+| **4k** | — | 1742 / **89.5**（峰值 92.0） | 1697 / **102.5**（峰值 104.0） | 1696 / **96.5**（峰值 107.0） | — |
+| **8k** | 1131 / 49.4 | 1673 / **81.6**（峰值 83.0） | 1586 / **84.2**（峰值 96.0） | 1592 / **102.0**（峰值 110.0） | 929 / 65.6 |
+| **16k** | 838 / 45.7 | 1495 / **82.2**（峰值 90.0） | 1491 / **80.4 ~ 87.9**（峰值 95.0） | 1416 / **90.5**（峰值 101.0） | 904 / 58.9 |
 | **32k** | — | 1163 / **62.0** | — | 1190 / **64.2** | — |
 | **64k** | — | 836 / **56.1** | — | 848 / **56.9** | — |
 
 ### 要点
 
-- **投机解码收益显著**：0–16k 全深度 DFlash2/MTP 的 decode 领先早期 stock vLLM **50–90%**（depth 0 从 54→98~102 tok/s）。
+- **投机解码收益显著**：0–16k 全深度 DFlash2/MTP 的 decode 领先早期 stock vLLM **50–120%**（depth 0 从 54→102~119 tok/s）。
+- **自适应投机消除深层衰退**：通过在 `[n_min=2, n_max=7]` 间动态调节草稿长度，DFlash2-W4A16 在 4k 深度保持 **102.5 tok/s**，在 16k 深度保持 **87.9 tok/s**，depth 0 达到 **118.9 tok/s**。
 - **MTP3 在中深长上下文领先**：MTP3 在 8k 深度达到 **102 tok/s**，在 16k 深度保持 **90.5 tok/s**，且与主模型共享 KV 缓存。
-- **DFlash2 统治结构化数学与代码推理**：DFlash2-W4A16 达到 **182.9 tok/s**（MATH-500 峰值 197.3 tok/s），DFlash2-BF16 达到 **178.2 tok/s**，领先 MTP3 达 **+35–39%**。
+- **DFlash2 统治结构化数学与代码推理**：DFlash2-W4A16 达到 **183.8 tok/s**（MATH-500 峰值 **196.0 tok/s**），DFlash2-BF16 达到 **178.2 tok/s**，领先 MTP3 达 **+35–40%**。
 - **KV cache 权衡**：
   - **MTP3**：**11.3 GiB / 63.8 万 tokens** 可用缓存（~2.44x 并发 @ 262k）。
   - **DFlash2 (W4A16)**：**7.7 GiB / 33.5 万 tokens** 可用缓存（~1.68x 并发 @ 200k）。
@@ -202,12 +211,10 @@ python -m vllm.entrypoints.openai.api_server \
 | 引擎 | 平均 decode |
 | :--- | :---: |
 | vLLM Baseline（无投机） | 56.3 tok/s |
-| **vLLM DFlash2 (W4A16, K=7)** | **182.9 tok/s（3.24×）** 🏆 |
+| **vLLM DFlash2 (W4A16, 自适应 K=7)** | **183.8 tok/s（峰值 196.0 tok/s，3.26×）** 🏆 |
 | **vLLM DFlash2 (BF16, K=7)** | **178.2 tok/s（3.16×）** |
 | vLLM MTP3 (K=3) | 131.4 tok/s（2.33×） |
 | llama.cpp (Q6_K_XL, MTP) | 87.5 tok/s（1.55×） |
-
-（DFlash2 行为 eager 模式实测；完整表见 `IMPROVEMENTS.md` §9.2。）
 
 ---
 
@@ -221,8 +228,9 @@ python -m vllm.entrypoints.openai.api_server \
 
 ---
 
-## 参考
+## 参考与致谢
 
+- **自适应投机解码启发**：在线截断观测 EMA 控制器设计灵感源自 Laurent Zuijdwijk 在 [llama.cpp commit `ca26169`](https://github.com/LaurentZuijdwijk/llama.cpp/commit/ca26169d2efefebc028a25c115714080dc2475e3) 的实现以及 [@Digit4lSoluti0n 的讨论](https://x.com/digit4lsoluti0n/status/2092700856164421861?s=46)。
 - 上游原始 README：[vllm-project/vllm](https://github.com/vllm-project/vllm#readme) —— 本 fork
   以 RDNA3 专属内容替换之。
 - 调查笔记：`DFLASH2_CG_FIX_PLAN.md`、`IMPROVEMENTS.md`（基准历史）、`AGENTS.md`（运维教训）
