@@ -49,10 +49,13 @@ def _sync_ngram_draft_logits_kernel(
     draft_logits_stride_1: tl.int64,
     ngram_drafts_stride_0: tl.int64,
     num_reqs: int,
+    vocab_size: int,
     num_steps: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
     HAS_CACHED_CANDIDATES: tl.constexpr,
+    DENSE_ROW_CLEAR: tl.constexpr,
+    CLEAR_BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     req_i = pid // num_steps
@@ -85,6 +88,13 @@ def _sync_ngram_draft_logits_kernel(
         old_token_ids = tl.load(cached_candidates_ptr + cache_base + offsets, mask=mask)
         tl.store(logits_base + old_token_ids, -float("inf"), mask=mask)
         tl.store(cached_candidates_ptr + cache_base, forced_tok)
+    elif DENSE_ROW_CLEAR:
+        # Clear full dense vocabulary row to -inf before storing forced token
+        num_chunks = tl.cdiv(vocab_size, CLEAR_BLOCK_SIZE)
+        for c in range(num_chunks):
+            v_offs = c * CLEAR_BLOCK_SIZE + tl.arange(0, CLEAR_BLOCK_SIZE)
+            v_mask = v_offs < vocab_size
+            tl.store(logits_base + v_offs, -float("inf"), mask=v_mask)
 
     # Force probability 1.0 (logit 0.0 with all other -inf)
     tl.store(logits_base + forced_tok, 0.0)
@@ -419,6 +429,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 top_k = getattr(self, "selector_top_k", 0)
                 has_cached = cached_cands is not None and top_k > 0
                 block_k = triton.next_power_of_2(top_k) if top_k > 0 else 1
+                vocab_size = self.draft_logits.shape[-1]
                 grid = (num_reqs * self.num_speculative_steps,)
                 _sync_ngram_draft_logits_kernel[grid](
                     self.draft_logits,
@@ -430,10 +441,13 @@ class DFlashSpeculator(DraftModelSpeculator):
                     self.draft_logits.stride(1),
                     ngram_drafts.stride(0),
                     num_reqs,
+                    vocab_size=vocab_size,
                     num_steps=self.num_speculative_steps,
                     top_k=top_k,
                     BLOCK_K=block_k,
                     HAS_CACHED_CANDIDATES=has_cached,
+                    DENSE_ROW_CLEAR=not has_cached,
+                    CLEAR_BLOCK_SIZE=1024,
                     num_warps=1,
                 )
 
