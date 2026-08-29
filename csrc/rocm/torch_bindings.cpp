@@ -58,19 +58,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
 #endif
 
-  // DFlash2 1D Grouped Conv Fused Kernel
-  rocm_ops.def(
-      "grouped_conv_fused_hip(Tensor hidden_states, Tensor delta, Tensor base, "
-      "int block_size, int num_groups, int group_size) -> Tensor");
-  rocm_ops.impl("grouped_conv_fused_hip", torch::kCUDA, &grouped_conv_fused_hip);
-
-  // Split-KV reduce_segments Kernel
-  rocm_ops.def(
-      "reduce_segments_hip(Tensor! output, Tensor segm_output, Tensor segm_max, "
-      "Tensor segm_expsum, Tensor seq_lens, Tensor query_start_len, "
-      "int num_seqs, int num_query_heads, int head_size, int head_size_padded, int max_num_segments, int tile_size) -> ()");
-  rocm_ops.impl("reduce_segments_hip", torch::kCUDA, &reduce_segments_hip);
-
   // Custom attention op
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.

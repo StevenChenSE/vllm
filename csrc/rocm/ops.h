@@ -42,28 +42,6 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
-torch::Tensor grouped_conv_fused_hip(
-    torch::Tensor hidden_states,
-    torch::Tensor delta,
-    torch::Tensor base,
-    int64_t block_size,
-    int64_t num_groups,
-    int64_t group_size);
-
-void reduce_segments_hip(
-    torch::Tensor output,
-    torch::Tensor segm_output,
-    torch::Tensor segm_max,
-    torch::Tensor segm_expsum,
-    torch::Tensor seq_lens,
-    torch::Tensor query_start_len,
-    int64_t num_seqs,
-    int64_t num_query_heads,
-    int64_t head_size,
-    int64_t head_size_padded,
-    int64_t max_num_segments,
-    int64_t tile_size);
-
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
