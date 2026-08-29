@@ -21,6 +21,7 @@ import functools
 import gc
 import os
 import time
+from contextlib import AbstractContextManager
 from copy import deepcopy
 from typing import Any, NamedTuple
 
@@ -156,6 +157,7 @@ from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
     KVBlockZeroer,
+    clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
 )
@@ -525,7 +527,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return get_kv_cache_spec(self.vllm_config)
 
     def initialize_kv_cache(
-        self, kv_cache_config: KVCacheConfig, is_profiling: bool = False
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
@@ -657,6 +662,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             self.kernel_block_sizes,
             self.vllm_config,
+            kv_cache_allocation_context=kv_cache_allocation_context,
         )
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
@@ -864,9 +870,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.reset_encoder_cache()
         gc.collect()
 
-    def post_kv_cache_wake_up(self) -> None:
-        self.block_tables.init_block_table_layout_tensors()
-
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:
             self.encoder_cache.reset_mm_cache()
@@ -921,6 +924,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.block_tables,
                     self.attn_groups,
                     self.kv_cache_config,
+                    pcp_manager=self.pcp_manager,
                     has_lora=self.lora_config is not None,
                     use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
                     lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
@@ -2032,9 +2036,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         free_before_shutdown(self.vllm_config)
         if hasattr(self, "model_state"):
             del self.model_state
-        if getattr(self, "speculator", None) is not None:
+        # Detach the layer-level KV/state cache tensors before dropping the
+        # models; the model objects can outlive this runner.
+        speculator = getattr(self, "speculator", None)
+        if speculator is not None:
+            if draft_model := getattr(speculator, "model", None):
+                clear_layer_kv_caches(draft_model.modules())
             self.speculator = None
         if hasattr(self, "model"):
+            clear_layer_kv_caches(self.model.modules())
             del self.model
 
         gc.collect()
