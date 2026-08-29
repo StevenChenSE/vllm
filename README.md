@@ -15,9 +15,8 @@ DFlash2 drafter fixes, ROCm kernel optimizations, and a tuned dual-7900-XTX serv
 
 This branch (`feat/dflash-perf-opt`) carries RDNA3-specific improvements on top of upstream vLLM:
 
-- **DFlash2 speculative decoding fixes & Adaptive Controller** — resolves the CUDA-graph zero-acceptance collapse on
+- **DFlash2 speculative decoding fixes** — resolves the CUDA-graph zero-acceptance collapse on
   ROCm. Acceptance rate restored, draft tokens are real, 0–64k context stable.
-  Includes a **closed-loop adaptive draft length controller** (`AdaptiveSpecController`) inspired by [LaurentZuijdwijk/llama.cpp](https://github.com/LaurentZuijdwijk/llama.cpp/commit/ca26169d2efefebc028a25c115714080dc2475e3) and [@Digit4lSoluti0n](https://x.com/digit4lsoluti0n/status/2092700856164421861?s=46): dynamically tracks online token acceptance via censored EMA, probes upward on full acceptance, backs off under partial refusal, and applies GPU-vectorized mask filtering to eliminate deep-context attention degradation.
 - **ROCm kernel work** — fused native HIP kernels for 1D grouped conv and split-kv reduction,
   sliding-window detection hardening, draft-token sanitization.
 - **RDNA3 optimizations inherited from [JartX/vllm](https://github.com/JartX/vllm)** — after
@@ -103,7 +102,9 @@ separate checkpoints:
 
 ## How to run
 
-### 1. DFlash2 speculative decoding (BF16 Drafter)
+### 1. DFlash2 speculative decoding (W4A16 Quantized Drafter: `syvai/Qwen3.8-27B-DFlash2-W4A16`)
+
+Highest peak throughput on math reasoning (**182.0 tok/s**) and agentic multi-turn sessions (**101.9 tok/s** average):
 
 ```bash
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
@@ -125,44 +126,25 @@ python -m vllm.entrypoints.openai.api_server \
   --max-num-batched-tokens 2048 \
   --enable-chunked-prefill \
   --attention-backend TRITON_ATTN \
-  --speculative-config '{"method":"dflash","model":"/path/to/Qwen3.8-27B-DFlash2-bf16","num_speculative_tokens":7}' \
-  --compilation-config.cudagraph_capture_sizes "[1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64]" \
-  --performance-mode throughput
-```
-
-### 2. DFlash2 speculative decoding (W4A16 Quantized Drafter: `syvai/Qwen3.8-27B-DFlash2-W4A16`)
-
-Saves ~0.8 GiB VRAM per GPU and boosts mathematical reasoning decode to **183.8 tok/s** (peak **196.0 tok/s** on MATH-500).
-Closed-loop adaptive speculation is **enabled by default** (`VLLM_SPEC_DRAFT_ADAPTIVE=1`, `n_max=7, n_min=2`), maintaining high draft lengths during structured output while automatically backing off to eliminate attention degradation in deep contexts:
-
-```bash
-# Optional adaptive knobs (defaults shown):
-# export VLLM_SPEC_DRAFT_ADAPTIVE=1
-# export VLLM_SPEC_DRAFT_N_MIN=2
-# export VLLM_SPEC_DRAFT_ALPHA=0.25
-# export VLLM_SPEC_DRAFT_PROBE=1.0
-
-python -m vllm.entrypoints.openai.api_server \
-  --model /path/to/qwen3.8-27b-mtp-fixed \
-  --tensor-parallel-size 2 \
-  --gpu-memory-utilization 0.95 \
-  --kv-cache-dtype fp8 \
-  --max-model-len 200000 \
-  --mamba-cache-mode align \
-  --max-num-seqs 8 \
-  --max-num-batched-tokens 2048 \
-  --enable-chunked-prefill \
-  --attention-backend TRITON_ATTN \
   --speculative-config '{"method":"dflash","model":"/path/to/Qwen3.8-27B-DFlash2-W4A16","num_speculative_tokens":7}' \
   --compilation-config.cudagraph_capture_sizes "[1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64]" \
   --performance-mode throughput
 ```
 
-### 3. MTP3 speculative decoding (Native MTP Heads, `align` mode)
+### 2. MTP3 speculative decoding (Native MTP Heads, `align` mode)
 
-Best for ultra long-context agentic workloads and high concurrency (shares target KV cache, **11.3 GiB / 638k tokens**):
+Highest generation stability (**15.8% CV jitter**) and maximum usable KV cache (**11.3 GiB / 638k tokens**):
 
 ```bash
+export HSA_OVERRIDE_GFX_VERSION=11.0.0
+export HSA_ENABLE_IPC_MODE_LEGACY=0
+export HSA_FORCE_FINE_GRAIN_AMDGPU=1
+export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+export GCN_ARCH_NAME=gfx1100
+export VLLM_ROCM_USE_AITER=1
+export HF_HUB_OFFLINE=1
+export VLLM_USE_V2_MODEL_RUNNER=1
+
 python -m vllm.entrypoints.openai.api_server \
   --model /path/to/qwen3.8-27b-mtp-fixed \
   --tensor-parallel-size 2 \
@@ -173,6 +155,8 @@ python -m vllm.entrypoints.openai.api_server \
   --max-num-seqs 8 \
   --max-num-batched-tokens 2048 \
   --enable-chunked-prefill \
+  --enable-prefix-caching \
+  --enable-prompt-tokens-details \
   --attention-backend TRITON_ATTN \
   --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
   --performance-mode throughput
@@ -184,26 +168,25 @@ python -m vllm.entrypoints.openai.api_server \
 
 ## Performance numbers
 
-Measured with `llama-benchy 0.4.0` (`--pp 2048 --tg 128 --concurrency 1`, updated post upstream merge on `2026-08-27`).
-Cells are `prefill (PP, tok/s) / decode (TG, tok/s)`. DFlash2/MTP are fair runs without `VLLM_PROFILE_STEP`.
+Measured on Dual AMD Radeon RX 7900 XTX (TP=2, gfx1100, ROCm 7.14) with fresh cache and warmup.
+Values represent `prefill (PP, tok/s) / decode (TG, tok/s)`.
 
-| Context depth | stock vLLM (upstream, early) | **vLLM DFlash2 (BF16)** | **vLLM DFlash2 (W4A16, Adaptive)** | **vLLM MTP3 (BF16, align)** | llama.cpp (Q6_K_XL, MTP) |
-| :---: | :---: | :---: | :---: | :---: | :---: |
-| **0** | 1773 / 53.8 | 1634 / **98.7** (peak 107.0) | 1658 / **118.9** (peak 119.0) | 1617 / **102.3** (peak 105.0) | 803 / 63.7 |
-| **4k** | — | 1742 / **89.5** (peak 92.0) | 1697 / **102.5** (peak 104.0) | 1696 / **96.5** (peak 107.0) | — |
-| **8k** | 1131 / 49.4 | 1673 / **81.6** (peak 83.0) | 1586 / **84.2** (peak 96.0) | 1592 / **102.0** (peak 110.0) | 929 / 65.6 |
-| **16k** | 838 / 45.7 | 1495 / **82.2** (peak 90.0) | 1491 / **80.4 ~ 87.9** (peak 95.0) | 1416 / **90.5** (peak 101.0) | 904 / 58.9 |
-| **32k** | — | 1163 / **62.0** | — | 1190 / **64.2** | — |
-| **64k** | — | 836 / **56.1** | — | 848 / **56.9** | — |
+| Context Depth / Metric | Baseline (No Spec) | **vLLM DFlash2 (W4A16, N=7)** | **vLLM MTP3 (BF16, align, N=3)** | llama.cpp (Q6_K_XL, MTP) |
+| :---: | :---: | :---: | :---: | :---: |
+| **Depth 0 (Short)** | 1773 / 53.8 | 1904 / **96.9** (peak 100.1) | 1763 / **96.9** (peak 100.1) | 803 / 63.7 |
+| **Depth 4k** | — | 1796 / **76.4** (peak 78.9) | 1716 / **78.9** (peak 81.5) | — |
+| **Depth 8k** | 1131 / 49.4 | 1718 / **90.1** (peak 93.0) | 1640 / **83.6** (peak 86.3) | 929 / 65.6 |
+| **Depth 16k** | 838 / 45.7 | 1552 / **34.2 ~ 70.0** (peak 81.0) | 1450 / **71.8 ~ 87.4** (peak 98.0) | 904 / 58.9 |
+| **40k Agentic Session (Mean TG)** | 35.7 | **101.9 tok/s (peak 133.6)** 🏆 | **93.2 tok/s (peak 116.0)** | — |
+| **40k Agentic Session (Jitter CV)** | — | 19.0% | **15.8% (Most Stable)** 🏆 | — |
+| **Math Reasoning (GSM8K/MATH)** | 56.3 | **182.0 tok/s (peak 195.4, 3.23×)** 🏆 | **131.2 tok/s (peak 134.5, 2.33×)** | 87.5 |
 
 ### Takeaways
 
-- **Speculative decoding wins big**: DFlash2/MTP beat stock vLLM decode by **+50–120%** across 0–16k context (54→102~119 tok/s at depth 0).
-- **Adaptive speculation eliminates deep-context drop**: By dynamically adjusting draft length between `[n_min=2, n_max=7]`, DFlash2-W4A16 sustains **102.5 tok/s @ 4k** and **87.9 tok/s @ 16k**, while reaching **118.9 tok/s @ depth 0**.
-- **MTP3 leads in medium-to-deep context**: MTP3 sustains **102 tok/s @ 8k** and **90.5 tok/s @ 16k**, outperforming DFlash2 in deep contexts while sharing target KV cache.
-- **DFlash2 dominates structured math/code generation**: DFlash2-W4A16 reaches **183.8 tok/s** (peak **196.0 tok/s** on MATH-500) and DFlash2-BF16 reaches **178.2 tok/s**, outperforming MTP3 (131.4 tok/s) by **+35–40%**.
+- **DFlash2 Baseline dominates peak decode**: Achieves **182.0 tok/s** on math reasoning (+38.7% over MTP3) and **101.9 tok/s** mean generation speed across 40k agentic sessions.
+- **Tuned MTP3 excels in long-context stability**: Sustains **71.8 ~ 87.4 tok/s @ 16k** and **93.2 tok/s** across 40k sessions with the lowest generation jitter (**15.8% CV**) while sharing the target KV cache.
 - **KV cache trade-off**:
-  - **MTP3**: **11.3 GiB / 638k tokens** usable KV cache (~2.4x concurrency @ 262k).
+  - **MTP3**: **11.3 GiB / 638k tokens** usable KV cache (~2.44x concurrency @ 262k).
   - **DFlash2 (W4A16)**: **7.7 GiB / 335k tokens** usable KV cache (~1.68x concurrency @ 200k).
   - **DFlash2 (BF16)**: **6.5 GiB / 282k tokens** usable KV cache (~1.41x concurrency @ 200k).
 
@@ -216,9 +199,9 @@ Cells are `prefill (PP, tok/s) / decode (TG, tok/s)`. DFlash2/MTP are fair runs 
 | engine | avg decode |
 | :--- | :---: |
 | vLLM Baseline (no spec) | 56.3 tok/s |
-| **vLLM DFlash2 (W4A16, Adaptive K=7)** | **183.8 tok/s (peak 196.0 tok/s, 3.26×)** 🏆 |
+| **vLLM DFlash2 (W4A16, K=7)** | **182.0 tok/s (peak 195.4 tok/s, 3.23×)** 🏆 |
 | **vLLM DFlash2 (BF16, K=7)** | **178.2 tok/s (3.16×)** |
-| vLLM MTP3 (K=3) | 131.4 tok/s (2.33×) |
+| vLLM MTP3 (K=3) | 131.2 tok/s (2.33×) |
 | llama.cpp (Q6_K_XL, MTP) | 87.5 tok/s (1.55×) |
 
 (DFlash2 row measured in eager mode; full table in `IMPROVEMENTS.md` §9.2.)
@@ -237,7 +220,6 @@ Cells are `prefill (PP, tok/s) / decode (TG, tok/s)`. DFlash2/MTP are fair runs 
 
 ## Reference & Acknowledgements
 
-- **Adaptive Speculative Decoding Inspiration**: The online censored-observation EMA draft controller is inspired by Laurent Zuijdwijk's implementation in [llama.cpp commit `ca26169`](https://github.com/LaurentZuijdwijk/llama.cpp/commit/ca26169d2efefebc028a25c115714080dc2475e3) and the [@Digit4lSoluti0n discussion](https://x.com/digit4lsoluti0n/status/2092700856164421861?s=46).
 - Original upstream README: [vllm-project/vllm](https://github.com/vllm-project/vllm#readme) — this fork
   replaces it with RDNA3-specific content.
 - Investigation notes: `DFLASH2_CG_FIX_PLAN.md`, `IMPROVEMENTS.md` (benchmark history), `AGENTS.md`

@@ -2164,7 +2164,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Adaptive Speculative Decoding (closed-loop EMA acceptance tracking)
     "VLLM_SPEC_DRAFT_ADAPTIVE": lambda: bool(
-        int(os.getenv("VLLM_SPEC_DRAFT_ADAPTIVE", "1"))
+        int(os.getenv("VLLM_SPEC_DRAFT_ADAPTIVE", "0"))
     ),
     "VLLM_SPEC_DRAFT_N_MIN": lambda: int(os.getenv("VLLM_SPEC_DRAFT_N_MIN", "2")),
     "VLLM_SPEC_DRAFT_ALPHA": lambda: float(os.getenv("VLLM_SPEC_DRAFT_ALPHA", "0.25")),
@@ -2172,7 +2172,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Hybrid Speculative Decoding (N-gram / Prompt Lookup Fusion)
     "VLLM_SPEC_HYBRID_NGRAM": lambda: bool(
-        int(os.getenv("VLLM_SPEC_HYBRID_NGRAM", "1"))
+        int(os.getenv("VLLM_SPEC_HYBRID_NGRAM", "0"))
     ),
     "VLLM_SPEC_NGRAM_MIN": lambda: int(os.getenv("VLLM_SPEC_NGRAM_MIN", "2")),
     "VLLM_SPEC_NGRAM_MAX": lambda: int(os.getenv("VLLM_SPEC_NGRAM_MAX", "4")),
