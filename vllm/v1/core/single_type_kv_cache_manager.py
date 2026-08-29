@@ -84,7 +84,7 @@ class SingleTypeKVCacheManager(ABC):
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
         self._record_new_block_ids = needs_kv_cache_zeroing and isinstance(
-            kv_cache_spec, AttentionSpec
+            kv_cache_spec, (AttentionSpec, MambaSpec)
         )
         self.new_block_ids: list[int] = []
 
