@@ -38,6 +38,58 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
+@triton.jit
+def _sync_ngram_draft_logits_kernel(
+    draft_logits_ptr,
+    ngram_drafts_ptr,
+    ngram_match_lens_ptr,
+    idx_mapping_ptr,
+    cached_candidates_ptr,
+    draft_logits_stride_0: tl.int64,
+    draft_logits_stride_1: tl.int64,
+    ngram_drafts_stride_0: tl.int64,
+    num_reqs: int,
+    num_steps: tl.constexpr,
+    top_k: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    HAS_CACHED_CANDIDATES: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    req_i = pid // num_steps
+    step = pid % num_steps
+    if req_i >= num_reqs:
+        return
+
+    req_state = tl.load(idx_mapping_ptr + req_i)
+    if req_state < 0:
+        return
+
+    match_len = tl.load(ngram_match_lens_ptr + req_i)
+    if step >= match_len:
+        return
+
+    forced_tok = tl.load(ngram_drafts_ptr + req_i * ngram_drafts_stride_0 + step)
+    if forced_tok < 0:
+        return
+
+    logits_base = (
+        draft_logits_ptr
+        + req_state * draft_logits_stride_0
+        + step * draft_logits_stride_1
+    )
+
+    if HAS_CACHED_CANDIDATES:
+        offsets = tl.arange(0, BLOCK_K)
+        mask = offsets < top_k
+        cache_base = (req_state * num_steps + step) * top_k
+        old_token_ids = tl.load(cached_candidates_ptr + cache_base + offsets, mask=mask)
+        tl.store(logits_base + old_token_ids, -float("inf"), mask=mask)
+        tl.store(cached_candidates_ptr + cache_base, forced_tok)
+
+    # Force probability 1.0 (logit 0.0 with all other -inf)
+    tl.store(logits_base + forced_tok, 0.0)
+
+
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
@@ -362,19 +414,28 @@ class DFlashSpeculator(DraftModelSpeculator):
             # distribution in self.draft_logits. Invalidate cached logits for these
             # forced positions by resetting the forced positions or falling back
             # cleanly so rejection sampling does not compare against stale/wrong logits.
-            if self.draft_logits is not None and ngram_valid_mask.any():
-                for req_i in range(num_reqs):
-                    req_state_idx = int(self.idx_mapping[req_i].item())
-                    if req_state_idx < 0:
-                        continue
-                    m_len = int(ngram_match_lens[req_i].item())
-                    if m_len > 0:
-                        for s in range(min(m_len, self.num_speculative_steps)):
-                            # Set cached logit to 0.0 for the forced token and -inf for all others
-                            tok_id = int(ngram_drafts[req_i, s].item())
-                            if tok_id >= 0:
-                                self.draft_logits[req_state_idx, s].fill_(-float("inf"))
-                                self.draft_logits[req_state_idx, s, tok_id] = 0.0
+            if self.draft_logits is not None:
+                cached_cands = getattr(self, "_cached_candidate_ids", None)
+                top_k = getattr(self, "selector_top_k", 0)
+                has_cached = cached_cands is not None and top_k > 0
+                block_k = triton.next_power_of_2(top_k) if top_k > 0 else 1
+                grid = (num_reqs * self.num_speculative_steps,)
+                _sync_ngram_draft_logits_kernel[grid](
+                    self.draft_logits,
+                    ngram_drafts,
+                    ngram_match_lens,
+                    self.idx_mapping,
+                    cached_cands,
+                    self.draft_logits.stride(0),
+                    self.draft_logits.stride(1),
+                    ngram_drafts.stride(0),
+                    num_reqs,
+                    num_steps=self.num_speculative_steps,
+                    top_k=top_k,
+                    BLOCK_K=block_k,
+                    HAS_CACHED_CANDIDATES=has_cached,
+                    num_warps=1,
+                )
 
             # Re-apply adaptive ceiling mask if active
             if skip_mask is not None:

@@ -523,6 +523,11 @@ class TritonAttentionImpl(AttentionImpl):
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
+        if kv_cache_dtype == "int8_per_tensor":
+            logger.warning_once(
+                "int8_per_tensor KV cache dtype selected with static scale; "
+                "offline/online calibration is not configured for this mode."
+            )
 
         # Enable tensor descriptors for Q/K/V load/store on platforms that
         # benefit from HW 2D block reads (Intel XPU).  The dead branch
