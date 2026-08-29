@@ -818,6 +818,8 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        if hasattr(self, "lm_head") and hasattr(self.lm_head, "weight") and hidden_states.dtype != self.lm_head.weight.dtype:
+            hidden_states = hidden_states.to(dtype=self.lm_head.weight.dtype)
         logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
             return logits

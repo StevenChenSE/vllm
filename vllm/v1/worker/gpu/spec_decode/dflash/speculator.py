@@ -358,6 +358,24 @@ class DFlashSpeculator(DraftModelSpeculator):
             ) & (ngram_drafts >= 0)
             reshaped = torch.where(ngram_valid_mask, ngram_drafts, reshaped)
 
+            # In probabilistic sampling, forced n-gram tokens have no valid draft
+            # distribution in self.draft_logits. Invalidate cached logits for these
+            # forced positions by resetting the forced positions or falling back
+            # cleanly so rejection sampling does not compare against stale/wrong logits.
+            if self.draft_logits is not None and ngram_valid_mask.any():
+                for req_i in range(num_reqs):
+                    req_state_idx = int(self.idx_mapping[req_i].item())
+                    if req_state_idx < 0:
+                        continue
+                    m_len = int(ngram_match_lens[req_i].item())
+                    if m_len > 0:
+                        for s in range(min(m_len, self.num_speculative_steps)):
+                            # Set cached logit to 0.0 for the forced token and -inf for all others
+                            tok_id = int(ngram_drafts[req_i, s].item())
+                            if tok_id >= 0:
+                                self.draft_logits[req_state_idx, s].fill_(-float("inf"))
+                                self.draft_logits[req_state_idx, s, tok_id] = 0.0
+
             # Re-apply adaptive ceiling mask if active
             if skip_mask is not None:
                 reshaped.masked_fill_(skip_mask, -1)

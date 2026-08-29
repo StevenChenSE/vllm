@@ -114,7 +114,7 @@ class MambaHybridModelState(DefaultModelState):
                 else getattr(self.cache_config, "mamba_block_size", None) or self.cache_config.block_size
             )
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // mamba_bs
+                max(0, (new_req_data.num_computed_tokens - 1) // mamba_bs) if new_req_data.num_computed_tokens > 0 else -1
             )
             self._mamba_src_col_gpu[req_index].fill_(-1)
             self._mamba_src_off_gpu[req_index].fill_(0)

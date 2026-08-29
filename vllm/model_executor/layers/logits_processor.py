@@ -278,12 +278,15 @@ class LogitsProcessor(PluggableLayer):
             logits[..., -num_pad:] = -float("inf")
 
         values, ids = _topk(logits, k)
+        # NaN protection: if logits contain NaN on this shard, treat as -inf
+        values = torch.nan_to_num(values, nan=-float("inf"))
         # Convert shard-local indices to global vocab indices.
         ids = ids.to(torch.int64) + lm_head.shard_indices.org_vocab_start_index
 
         if lm_head.tp_size > 1:
             values = tensor_model_parallel_all_gather(values, dim=-1)
             ids = tensor_model_parallel_all_gather(ids, dim=-1)
+            values = torch.nan_to_num(values, nan=-float("inf"))
             values, selected = _topk(values, k)
             ids = ids.gather(-1, selected)
 
