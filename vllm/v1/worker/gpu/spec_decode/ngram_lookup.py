@@ -33,13 +33,19 @@ def _vectorized_ngram_lookup_kernel(
     if pid >= num_reqs:
         return
 
+    out_base = ngram_draft_ptr + pid * ngram_draft_stride
     req_idx = tl.load(idx_mapping_ptr + pid)
     if req_idx < 0:
+        tl.store(ngram_match_len_ptr + pid, 0)
+        for k in range(max_spec_tokens):
+            tl.store(out_base + k, -1)
         return
 
     total_len = tl.load(total_lens_ptr + req_idx)
     if total_len <= min_ngram:
         tl.store(ngram_match_len_ptr + pid, 0)
+        for k in range(max_spec_tokens):
+            tl.store(out_base + k, -1)
         return
 
     token_base = all_token_ids_ptr + req_idx * all_token_ids_stride
@@ -123,6 +129,15 @@ class NgramLookupModule:
         max_history_search: int = 4096,
         device: torch.device = torch.device("cuda"),
     ):
+        if min_ngram < 2:
+            raise ValueError(f"min_ngram must be >= 2, got {min_ngram}")
+        if max_ngram < min_ngram:
+            raise ValueError(f"max_ngram must be >= min_ngram ({min_ngram}), got {max_ngram}")
+        if max_ngram > 4:
+            raise ValueError(
+                f"max_ngram ({max_ngram}) > 4 is not supported by the unrolled SIMD Triton kernel"
+            )
+
         self.max_num_reqs = max_num_reqs
         self.max_spec_tokens = max_spec_tokens
         self.min_ngram = min_ngram

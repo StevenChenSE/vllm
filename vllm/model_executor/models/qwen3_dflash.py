@@ -496,7 +496,15 @@ class DFlashQwen3Model(nn.Module):
 
         # Check if qkv_proj layers have standard unquantized float weights
         first_qkv = layers_attn[0].qkv_proj
-        self._is_quantized_qkv = not hasattr(first_qkv, "weight") or first_qkv.weight is None
+        # A layer is considered unquantized standard linear if it has an unquantized 2D floating-point weight
+        has_plain_weight = (
+            hasattr(first_qkv, "weight")
+            and first_qkv.weight is not None
+            and hasattr(first_qkv.weight, "dtype")
+            and first_qkv.weight.dtype.is_floating_point
+            and first_qkv.weight.ndim == 2
+        )
+        self._is_quantized_qkv = not has_plain_weight
 
         if not self._is_quantized_qkv:
             # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
