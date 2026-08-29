@@ -1912,6 +1912,34 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+        if (
+            os.environ.get("VLLM_DEBUG_MM_SPEC") == "1"
+            and self.encoder_cache is not None
+        ):
+            _mm_rows = [
+                i
+                for i, r in enumerate(input_batch.req_ids)
+                if len(self.encoder_cache.mm_features.get(r, [])) > 0
+            ]
+            if _mm_rows:
+                _sts = sampler_output.sampled_token_ids
+                _sts_list = (
+                    _sts.flatten()[:8].tolist()
+                    if torch.is_tensor(_sts)
+                    else list(_sts)[:8]
+                )
+                _dt = self.req_states.draft_tokens[
+                    input_batch.idx_mapping[_mm_rows]
+                ]
+                logger.info(
+                    "MM_SPEC sched=%s sampled=%s drafts(mm)=%s",
+                    input_batch.num_scheduled_tokens[
+                        : len(input_batch.req_ids)
+                    ].tolist(),
+                    _sts_list,
+                    _dt.flatten()[:6].tolist(),
+                )
+
         if self.speculator is not None:
             assert self.sampler is not None
             # Let the target override the hidden state fed to the drafter
