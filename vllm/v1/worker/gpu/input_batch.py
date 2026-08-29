@@ -435,9 +435,9 @@ def _combine_sampled_and_draft_tokens_kernel(
 
     # Keep prompt-tail slots intact; only rewrite generated-token slots.
     first_logit_seq_pos = seq_len - num_logits
+    last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
     if NUM_NEW_SAMPLED_TOKENS > 0 and first_logit_seq_pos >= prefill_len:
         # Write the last sampled token ID to input_ids.
-        last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
         tl.store(input_ids_ptr + logits_start, last_token_id)
 
     # Write the draft tokens (if any) to input_ids.
@@ -447,6 +447,13 @@ def _combine_sampled_and_draft_tokens_kernel(
             draft_tokens_ptr + req_state_idx * draft_tokens_stride + block,
             mask=mask,
         )
+        # Invalid (negative) draft slots - the mm-bypass fill for requests
+        # whose drafter cannot consume multimodal inputs, and invalid-slot
+        # padding - must never reach the embedding lookup as raw -1 token
+        # ids: the verify forward would embed out-of-table values and
+        # poison the recurrent state. Substitute the last sampled token;
+        # these positions are rejected and re-prefilled next step.
+        draft_tokens = tl.where(draft_tokens >= 0, draft_tokens, last_token_id)
         tl.store(
             input_ids_ptr + query_end - num_draft_tokens + block,
             draft_tokens,
