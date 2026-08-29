@@ -86,11 +86,15 @@ def _get_aligned_state_indices_kernel(
 
     state_slots = tl.arange(0, BLOCK_STATE_SLOTS)
     valid_state_slot = state_slots < NUM_STATE_SLOTS
+    # Guard against OOB slot column indexing beyond row stride near max context length
+    col_idx = first_state_slot[:, None] + state_slots[None, :]
+    valid_col = col_idx < (block_table_stride_0 // block_table_stride_1)
     state_indices = tl.load(
         block_table_ptr
         + rows[:, None] * block_table_stride_0
-        + (first_state_slot[:, None] + state_slots[None, :]) * block_table_stride_1,
-        mask=valid_row[:, None] & valid_state_slot[None, :],
+        + col_idx * block_table_stride_1,
+        mask=valid_row[:, None] & valid_state_slot[None, :] & valid_col,
+        other=0,
     )
     tl.store(
         state_indices_ptr

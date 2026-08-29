@@ -223,6 +223,11 @@ class LogitsProcessor(PluggableLayer):
             logits[..., -num_pad:] = -float("inf")
 
         local_max_vals, local_max_indices = logits.max(dim=-1)
+        if torch.isnan(local_max_vals).any():
+            logger.warning_once(
+                "NaN detected in logits during get_top_tokens reduction; "
+                "numeric instability in upstream model forward pass."
+            )
         # NaN protection: if logits contain NaN on this shard, treat as -inf
         local_max_vals = torch.nan_to_num(local_max_vals, nan=-float("inf"))
 

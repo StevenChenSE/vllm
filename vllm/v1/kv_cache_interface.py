@@ -431,7 +431,10 @@ class AttentionSpec(KVCacheSpec):
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         parallel_config = vllm_config.parallel_config
         kv_shard_count = parallel_config.decode_context_parallel_size
-        return cdiv(max_len, self.block_size * kv_shard_count)
+        return (
+            cdiv(max_len, self.block_size * kv_shard_count)
+            + self.num_speculative_blocks
+        )
 
 
 @dataclass(frozen=True, kw_only=True)

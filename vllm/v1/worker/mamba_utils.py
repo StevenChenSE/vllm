@@ -70,16 +70,20 @@ def get_aligned_state_indices_multi_group_kernel(
     block_tables = group_base_addrs.to(tl.pointer_type(tl.int32))
     state_slots = tl.arange(0, BLOCK_STATE_SLOTS)
     valid_state_slot = state_slots < NUM_STATE_SLOTS
+    # Guard against OOB slot column indexing beyond row stride near max context length
+    col_idx = first_state_slot[:, None] + state_slots[None, :]
+    valid_col = col_idx < block_table_stride_req
     state_indices = tl.load(
         block_tables[:, None, None]
         + rows[None, :, None] * block_table_stride_req
-        + first_state_slot[None, :, None]
-        + state_slots[None, None, :],
+        + col_idx[None, :, :],
         mask=(
             valid_group[:, None, None]
             & valid_row[None, :, None]
             & valid_state_slot[None, None, :]
+            & valid_col[None, :, :]
         ),
+        other=0,
     )
     tl.store(
         state_indices_ptr
