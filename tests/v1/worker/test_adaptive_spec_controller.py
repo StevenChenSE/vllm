@@ -112,8 +112,55 @@ def test_adaptive_controller_reset():
     assert controller.last_draft_len[0].item() == 0
 
 
+def test_adaptive_controller_batch_vectorized():
+    devices = [torch.device("cpu")]
+    if torch.cuda.is_available():
+        devices.append(torch.device("cuda:0"))
+
+    for dev in devices:
+        controller = AdaptiveSpecController(
+            max_num_reqs=8,
+            n_max=7,
+            n_min=1,
+            alpha=0.25,
+            probe_step=1.0,
+            init_val=2.0,
+            device=dev,
+            enabled=True,
+        )
+
+        idx_mapping = torch.tensor([0, 1, 2, 3, -1, 99], dtype=torch.int64, device=dev)
+        # Get draft lengths for batch
+        eff_lens = controller.get_batch_effective_draft_lengths(idx_mapping)
+        assert eff_lens.shape[0] == 6
+        assert eff_lens[0].item() == 2
+        assert controller.last_draft_len[0].item() == 2
+        assert controller.last_draft_len[1].item() == 2
+
+        # Step 1: Batch update with mixed outcomes
+        # req 0: full accept (n_accepted=2 >= n_drafted=2) -> probe 2.0 + 1.0 = 3.0
+        # req 1: partial accept (n_accepted=1 < n_drafted=2) -> decay (1-0.25)*2.0 + 0.25*1 = 1.75
+        # req 2: prefill step (num_sampled=0) -> skipped, draft_len preserved
+        # req 3: full accept (n_accepted=2 >= n_drafted=2) -> probe 2.0 + 1.0 = 3.0
+        num_sampled = torch.tensor([3, 2, 0, 3, 3, 3], dtype=torch.int32, device=dev)
+        num_rejected = torch.tensor([0, 1, 0, 0, 0, 0], dtype=torch.int32, device=dev)
+
+        controller.update_acceptance(num_sampled, num_rejected, idx_mapping)
+
+        assert abs(controller.acc_ema[0].item() - 3.0) < 1e-4
+        assert abs(controller.acc_ema[1].item() - 1.75) < 1e-4
+        assert abs(controller.acc_ema[2].item() - 2.0) < 1e-4
+        assert abs(controller.acc_ema[3].item() - 3.0) < 1e-4
+
+        assert controller.last_draft_len[0].item() == 0
+        assert controller.last_draft_len[1].item() == 0
+        assert controller.last_draft_len[2].item() == 2  # preserved because num_sampled was 0
+        assert controller.last_draft_len[3].item() == 0
+
+
 if __name__ == "__main__":
     test_adaptive_controller_basic_transitions()
     test_adaptive_controller_floor_and_ceiling()
     test_adaptive_controller_reset()
+    test_adaptive_controller_batch_vectorized()
     print("All AdaptiveSpecController unit tests passed!")

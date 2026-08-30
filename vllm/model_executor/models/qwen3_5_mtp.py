@@ -216,6 +216,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
 class Qwen3_5MTP(
     LocalArgmaxMixin,
     nn.Module,
+    SupportsMultiModal,
     SupportsMambaPrefixCaching,
 ):
     # The MTP head can merge external multimodal embeddings into its input
@@ -238,6 +239,11 @@ class Qwen3_5MTP(
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
         cache_config = vllm_config.cache_config
+        if cache_config and cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Qwen3_5MTP currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
+            )
 
         self.quant_config = vllm_config.quant_config
 

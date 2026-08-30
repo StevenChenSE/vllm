@@ -74,33 +74,37 @@ class AdaptiveSpecController:
         if not self.enabled:
             return
 
-        num_reqs = num_sampled.shape[0]
-        for i in range(num_reqs):
-            req_idx = int(idx_mapping[i].item())
-            if req_idx < 0 or req_idx >= self.max_num_reqs:
-                continue
+        if num_sampled.numel() == 0:
+            return
 
-            n_drafted = int(self.last_draft_len[req_idx].item())
-            if n_drafted <= 0:
-                continue
+        idx_map = idx_mapping.to(device=self.device, dtype=torch.int64)
+        valid_req_mask = (idx_map >= 0) & (idx_map < self.max_num_reqs)
+        safe_req_indices = torch.where(valid_req_mask, idx_map, 0)
 
-            sampled_cnt = int(num_sampled[i].item())
-            if sampled_cnt == 0:
-                # Chunked prefill step: skip updating decode acceptance EMA
-                continue
+        last_draft = self.last_draft_len[safe_req_indices]
+        sampled_cnt = num_sampled.to(device=self.device, dtype=torch.float32)
 
-            n_accepted = max(0, sampled_cnt - 1)
-            current_ema = float(self.acc_ema[req_idx].item())
+        # Update condition: valid slot index, had active drafts in previous step, and non-zero sampled (not chunked prefill)
+        update_mask = valid_req_mask & (last_draft > 0) & (sampled_cnt > 0)
 
-            if n_accepted >= n_drafted:
-                # Censored observation: true predictability is at least n_drafted -> probe upward
-                new_ema = min(float(self.n_max), current_ema + self.probe_step)
-            else:
-                # Uncensored observation: exact stopping point observed -> EMA decay
-                new_ema = (1.0 - self.alpha) * current_ema + self.alpha * float(n_accepted)
+        target_indices = safe_req_indices[update_mask]
+        if target_indices.numel() == 0:
+            return
 
-            self.acc_ema[req_idx] = new_ema
-            self.last_draft_len[req_idx] = 0
+        n_accepted = torch.clamp(sampled_cnt[update_mask] - 1.0, min=0.0)
+        n_drafted = last_draft[update_mask].to(torch.float32)
+        current_ema = self.acc_ema[target_indices]
+
+        # Full acceptance: Censored observation -> additive probe (+probe_step) capped at n_max
+        probed_ema = torch.clamp(current_ema + self.probe_step, max=float(self.n_max))
+        # Partial acceptance: Uncensored observation -> EMA decay
+        decayed_ema = (1.0 - self.alpha) * current_ema + self.alpha * n_accepted
+
+        censored_mask = n_accepted >= n_drafted
+        new_ema = torch.where(censored_mask, probed_ema, decayed_ema)
+
+        self.acc_ema[target_indices] = new_ema
+        self.last_draft_len[target_indices] = 0
 
     def get_effective_draft_length(
         self,

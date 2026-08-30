@@ -787,10 +787,14 @@ class TritonAttentionImpl(AttentionImpl):
         # For decoder and cross-attention, use KV cache as before.
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            if self.kv_cache_dtype.startswith("fp8") and self.fp8_dtype is not None:
-                key_cache = key_cache.view(self.fp8_dtype)
-                value_cache = value_cache.view(self.fp8_dtype)
+        if (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.kv_cache_dtype != "int8_per_tensor"
+            and self.fp8_dtype is not None
+            and key_cache.dtype != self.fp8_dtype
+        ):
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
         triton_reshape_and_cache_flash(
             key,
             value,

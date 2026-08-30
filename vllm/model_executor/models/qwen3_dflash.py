@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
-import sys
 from collections.abc import Iterable
 
 import torch

@@ -16,7 +16,10 @@ from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadat
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import (
+    build_attn_metadata,
+    get_kv_cache_spec,
+)
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -102,17 +105,33 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
+            self.kv_cache_config: KVCacheConfig | None = None
+
+    def _get_mamba_block_size(self) -> int:
+        if self._mamba_spec is not None:
+            return self._mamba_spec.block_size
+        if self.cache_config.mamba_block_size is not None:
+            return self.cache_config.mamba_block_size
+        if self.kv_cache_config is not None:
+            _, spec = self._get_mamba_group_info(self.kv_cache_config)
+            return spec.block_size
+        try:
+            for spec in get_kv_cache_spec(self.vllm_config).values():
+                if isinstance(spec, MambaSpec):
+                    self._mamba_spec = spec
+                    return spec.block_size
+        except Exception:
+            pass
+        raise ValueError(
+            "Could not resolve MambaSpec or mamba_block_size for MambaHybridModelState."
+        )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
-            mamba_bs = (
-                self._mamba_spec.block_size
-                if self._mamba_spec is not None
-                else getattr(self.cache_config, "mamba_block_size", None) or self.cache_config.block_size
-            )
+            mamba_bs = self._get_mamba_block_size()
             self._mamba_state_idx_gpu[req_index].fill_(
                 (new_req_data.num_computed_tokens - 1) // mamba_bs
             )
@@ -187,6 +206,7 @@ class MambaHybridModelState(DefaultModelState):
         """
         if not self._align_mode:
             return
+        self.kv_cache_config = kv_cache_config
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
             return
@@ -232,6 +252,7 @@ class MambaHybridModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
     ) -> dict[str, Any]:
+        self.kv_cache_config = kv_cache_config
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding

@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
+import vllm.envs as envs
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
@@ -229,7 +230,7 @@ class LogitsProcessor(PluggableLayer):
             logits[..., -num_pad:] = -float("inf")
 
         local_max_vals, local_max_indices = logits.max(dim=-1)
-        if torch.isnan(local_max_vals).any():
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS and torch.isnan(local_max_vals).any():
             logger.warning_once(
                 "NaN detected in logits during get_top_tokens reduction; "
                 "numeric instability in upstream model forward pass."

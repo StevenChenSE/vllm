@@ -82,7 +82,7 @@ def _grouped_conv_fused_kernel(
 
     tl.store(
         output_ptr + h_idx_0,
-        out.to(tl.bfloat16),
+        out.to(output_ptr.dtype.element_ty),
         mask=mask_n[:, None],
     )
 
@@ -269,6 +269,8 @@ def _score_edges(
     anchor_token_ids: torch.Tensor,
 ) -> torch.Tensor:
     vocab_size = predecessor_table.shape[0]
+    cand_valid = (candidate_ids >= 0) & (candidate_ids < vocab_size)
+    anchor_valid = (anchor_token_ids >= 0) & (anchor_token_ids < vocab_size)
     safe_cand_ids = torch.clamp(candidate_ids, 0, vocab_size - 1)
     safe_anchor_ids = torch.clamp(anchor_token_ids, 0, vocab_size - 1)
     top_k = candidate_ids.shape[-1]
@@ -286,7 +288,16 @@ def _score_edges(
     cond = (predecessors * hidden.unsqueeze(2)).view(B * L, K, R)
     succ_t = successors.view(B * L, K, R).transpose(1, 2)
     scores = torch.bmm(cond, succ_t).view(B, L, K, K)
-    return unary_logits.unsqueeze(2) + scores
+    total_scores = unary_logits.unsqueeze(2) + scores
+    pred_valid = torch.cat(
+        (
+            anchor_valid[:, None, None].expand(-1, 1, top_k),
+            cand_valid[:, :-1],
+        ),
+        dim=1,
+    )
+    valid_mask = pred_valid.unsqueeze(3) & cand_valid.unsqueeze(2)
+    return total_scores.masked_fill(~valid_mask, -float("inf"))
 
 
 @support_torch_compile
