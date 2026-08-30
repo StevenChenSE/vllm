@@ -961,10 +961,16 @@ class Scheduler(SchedulerInterface):
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
+                    # Only for requests with valid pending drafts: requests
+                    # whose drafter is bypassed (e.g. a text-only MTP drafter
+                    # on a multimodal request) would otherwise burn a verify
+                    # plus a rejection re-prefill every step for drafts that
+                    # are discarded by construction.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
+                        and request.spec_token_ids
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens

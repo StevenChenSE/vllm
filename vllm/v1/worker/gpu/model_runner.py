@@ -273,6 +273,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
+        # Requests whose drafter cannot consume multimodal inputs (checked
+        # once at admission). Their proposals are discarded for the whole
+        # request lifetime: after the encoder cache frees the mm features,
+        # the drafter would still propose from a prompt KV whose placeholder
+        # positions were embedded from raw placeholder token ids, yielding
+        # ~0% acceptance and a wasted verify + re-prefill every step.
+        self.mm_spec_bypassed_req_ids: set[str] = set()
+
         self.pcp_manager: pcp.PCPManager | None = None
 
         # Pooling models.
@@ -965,6 +973,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.pp_handler.on_req_idx_freed(req_idx)
         if self.encoder_cache is not None:
             self.encoder_cache.remove_request(req_id)
+        self.mm_spec_bypassed_req_ids.discard(req_id)
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
         self.lora_state.remove_request(req_id)
@@ -1034,6 +1043,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.encoder_cache is not None:
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
+            if self.speculator is not None and not getattr(
+                self.speculator, "supports_mm_inputs", False
+            ):
+                if new_req_data.mm_features:
+                    self.mm_spec_bypassed_req_ids.add(req_id)
+                else:
+                    self.mm_spec_bypassed_req_ids.discard(req_id)
 
             self.model_state.add_request(req_index, new_req_data)
             self.block_tables.append_block_ids(
@@ -1968,9 +1984,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     all_token_ids=self.req_states.all_token_ids.gpu,
                     total_lens=self.req_states.total_len.gpu,
                 )
-            if not getattr(self.speculator, "supports_mm_inputs", False) and self.encoder_cache is not None:
+            if not getattr(self.speculator, "supports_mm_inputs", False) and (
+                self.encoder_cache is not None or self.mm_spec_bypassed_req_ids
+            ):
                 for i, req_id in enumerate(input_batch.req_ids):
-                    if len(self.encoder_cache.mm_features.get(req_id, [])) > 0:
+                    if (
+                        req_id in self.mm_spec_bypassed_req_ids
+                        or len(self.encoder_cache.mm_features.get(req_id, [])) > 0
+                    ):
                         draft_tokens[i].fill_(-1)
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
