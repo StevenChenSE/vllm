@@ -61,20 +61,20 @@ class AdaptiveSpecController:
     def update_acceptance(
         self,
         num_sampled: torch.Tensor,
-        num_rejected: torch.Tensor,
-        idx_mapping: torch.Tensor,
+        num_rejected: Optional[torch.Tensor] = None,
+        idx_mapping: Optional[torch.Tensor] = None,
     ) -> None:
         """Update EMA of accepted tokens based on post-verification results.
 
         Args:
             num_sampled: [num_reqs] count of accepted tokens (1 bonus + accepted drafts)
-            num_rejected: [num_reqs] count of rejected draft tokens
+            num_rejected: Optional [num_reqs] count of rejected draft tokens (unused)
             idx_mapping: [num_reqs] request state index mapping
         """
         if not self.enabled:
             return
 
-        if num_sampled.numel() == 0:
+        if num_sampled.numel() == 0 or idx_mapping is None:
             return
 
         idx_map = idx_mapping.to(device=self.device, dtype=torch.int64)
@@ -84,7 +84,8 @@ class AdaptiveSpecController:
         last_draft = self.last_draft_len[safe_req_indices]
         sampled_cnt = num_sampled.to(device=self.device, dtype=torch.float32)
 
-        # Update condition: valid slot index, had active drafts in previous step, and non-zero sampled (not chunked prefill)
+        # Update condition: valid slot index, had active drafts in previous step,
+        # and non-zero sampled (not chunked prefill)
         update_mask = valid_req_mask & (last_draft > 0) & (sampled_cnt > 0)
 
         target_indices = safe_req_indices[update_mask]
@@ -95,7 +96,8 @@ class AdaptiveSpecController:
         n_drafted = last_draft[update_mask].to(torch.float32)
         current_ema = self.acc_ema[target_indices]
 
-        # Full acceptance: Censored observation -> additive probe (+probe_step) capped at n_max
+        # Full acceptance: Censored observation -> additive probe (+probe_step)
+        # capped at n_max
         probed_ema = torch.clamp(current_ema + self.probe_step, max=float(self.n_max))
         # Partial acceptance: Uncensored observation -> EMA decay
         decayed_ema = (1.0 - self.alpha) * current_ema + self.alpha * n_accepted

@@ -959,7 +959,7 @@ def unified_attention(
 
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. The batch includes at least one prefill request, or
+    # 2. The batch includes prefill requests exceeding speculative verification limits (max_seqlen_q > 16 or q.shape[0] > seq_threshold_3D), or
     # 3. The number of sequences exceeds the configured threshold, or
     # 4. Batch invariance is enabled
     use_3d = not (
@@ -968,7 +968,8 @@ def unified_attention(
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
+        or max_seqlen_q > 16
+        or q.shape[0] > seq_threshold_3D
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
     )

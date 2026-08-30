@@ -177,9 +177,14 @@ class KVBlockZeroer:
                     # the full block stride preserved at dim 0. Register each
                     # state span as its own segment; the union covers the
                     # whole block's packed bytes.
-                    if not isinstance(kv, tuple):
+                    states = (
+                        kv if isinstance(kv, (tuple, list))
+                        else (kv,) if isinstance(kv, torch.Tensor)
+                        else ()
+                    )
+                    if not states:
                         continue
-                    for state in kv:
+                    for state in states:
                         el = state.element_size()
                         block_stride_bytes = state.stride(0) * el
                         page_bytes = math.prod(state.shape[1:]) * el

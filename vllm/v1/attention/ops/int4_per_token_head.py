@@ -739,7 +739,8 @@ def _launch_packed_attn(
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
+        or max_seqlen_q > 16
+        or q.shape[0] > seq_threshold_3D
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
     )

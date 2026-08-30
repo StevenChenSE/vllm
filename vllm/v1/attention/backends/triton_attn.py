@@ -827,8 +827,12 @@ class TritonAttentionImpl(AttentionImpl):
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         flash_layout = True
 
-        is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype) and self.kv_cache_dtype.startswith("fp8")
-        if is_fp8_kv_cache:
+        is_fp8_kv_cache = (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.kv_cache_dtype != "int8_per_tensor"
+            and self.fp8_dtype is not None
+        )
+        if is_fp8_kv_cache and key_cache.dtype != self.fp8_dtype:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
 

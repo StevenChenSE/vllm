@@ -230,13 +230,13 @@ class LogitsProcessor(PluggableLayer):
             logits[..., -num_pad:] = -float("inf")
 
         local_max_vals, local_max_indices = logits.max(dim=-1)
-        if envs.VLLM_COMPUTE_NANS_IN_LOGITS and torch.isnan(local_max_vals).any():
-            logger.warning_once(
-                "NaN detected in logits during get_top_tokens reduction; "
-                "numeric instability in upstream model forward pass."
-            )
-        # NaN protection: if logits contain NaN on this shard, treat as -inf
-        local_max_vals = torch.nan_to_num(local_max_vals, nan=-float("inf"))
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            if torch.isnan(local_max_vals).any():
+                logger.warning_once(
+                    "NaN detected in logits during get_top_tokens reduction; "
+                    "numeric instability in upstream model forward pass."
+                )
+            local_max_vals = torch.nan_to_num(local_max_vals, nan=-float("inf"))
 
         # Convert shard-local indices to global vocab indices.
         vocab_start = lm_head.shard_indices.org_vocab_start_index
@@ -254,7 +254,10 @@ class LogitsProcessor(PluggableLayer):
         gathered = tensor_model_parallel_all_gather(local_pair, dim=-1)
         # [batch, tp_size, 2] where [:, :, 0]=values, [:, :, 1]=indices
         gathered = gathered.view(hidden_states.shape[0], tp_size, 2)
-        gathered_vals = torch.nan_to_num(gathered[:, :, 0], nan=-float("inf"))
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            gathered_vals = torch.nan_to_num(gathered[:, :, 0], nan=-float("inf"))
+        else:
+            gathered_vals = gathered[:, :, 0]
         max_rank_idx = gathered_vals.argmax(dim=-1, keepdim=True)
         top_tokens = gathered[:, :, 1].gather(dim=-1, index=max_rank_idx)
         return top_tokens.squeeze(-1).to(torch.int64)

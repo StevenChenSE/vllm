@@ -120,10 +120,14 @@ class MambaHybridModelState(DefaultModelState):
                 if isinstance(spec, MambaSpec):
                     self._mamba_spec = spec
                     return spec.block_size
-        except Exception:
-            pass
+        except Exception as exc:
+            raise ValueError(
+                "Could not resolve MambaSpec or mamba_block_size for "
+                "MambaHybridModelState."
+            ) from exc
         raise ValueError(
-            "Could not resolve MambaSpec or mamba_block_size for MambaHybridModelState."
+            "Could not resolve MambaSpec or mamba_block_size for "
+            "MambaHybridModelState: no MambaSpec found in model kv cache specs."
         )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
