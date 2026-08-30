@@ -132,7 +132,10 @@ class KVBlockZeroer:
         Each virtual block is represented as an independent segment so its
         physical block stride and zeroed page span remain independent.
 
-        Only AttentionSpec layers are processed; Mamba layers are skipped.
+        Mamba layers are processed via their bound per-state views: each
+        state span becomes a segment so recycled mamba checkpoint blocks
+        are fully zeroed (stale recurrent states would otherwise poison
+        fresh requests' initial state).
         """
         self.device = device
         self._meta: (
@@ -151,18 +154,42 @@ class KVBlockZeroer:
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
-            if not isinstance(spec, AttentionSpec):
+            is_mamba = isinstance(spec, MambaSpec)
+            if not isinstance(spec, (AttentionSpec, MambaSpec)):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
-            kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
-            assert spec.block_size % kernel_bs == 0
-            ratio = spec.block_size // kernel_bs
+            if is_mamba:
+                # Mamba blocks map 1:1 to pool blocks (no virtual splitting).
+                ratio = 1
+            else:
+                kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+                assert spec.block_size % kernel_bs == 0
+                ratio = spec.block_size // kernel_bs
 
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
                 kv = static_forward_context[layer_name].kv_cache
+                if is_mamba:
+                    # Mamba layers bind a raw [B, 1, 1, C] int8 page tensor
+                    # into per-state views (conv, ssm), each [B, *shape] with
+                    # the full block stride preserved at dim 0. Register each
+                    # state span as its own segment; the union covers the
+                    # whole block's packed bytes.
+                    if not isinstance(kv, tuple):
+                        continue
+                    for state in kv:
+                        el = state.element_size()
+                        block_stride_bytes = state.stride(0) * el
+                        page_bytes = math.prod(state.shape[1:]) * el
+                        assert block_stride_bytes % 4 == 0
+                        assert page_bytes % 4 == 0
+                        assert (state.data_ptr()) % 4 == 0
+                        seg_addrs.append(state.data_ptr())
+                        seg_block_strides.append(block_stride_bytes // 4)
+                        seg_page_sizes.append(page_bytes // 4)
+                    continue
                 if not isinstance(kv, torch.Tensor):
                     continue
                 dp = kv.data_ptr()
