@@ -218,6 +218,13 @@ class Qwen3_5MTP(
     nn.Module,
     SupportsMambaPrefixCaching,
 ):
+    # The MTP head can merge external multimodal embeddings into its input
+    # embeddings, so speculative proposals stay informed by image context
+    # (the head conditions on the target's hidden states, but its own prompt
+    # KV would otherwise hold raw placeholder-id embeddings at image
+    # positions, degrading drafts for every later turn of the conversation).
+    supports_multimodal_embeddings = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -254,8 +261,22 @@ class Qwen3_5MTP(
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
-    def embed_input_ids(self, input_ids: torch.Tensor, **kwargs: object) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.model.embed_input_ids(input_ids)
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+        is_multimodal = _require_is_multimodal(is_multimodal)
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
 
     def forward(
         self,
