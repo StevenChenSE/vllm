@@ -61,20 +61,20 @@ class AdaptiveSpecController:
     def update_acceptance(
         self,
         num_sampled: torch.Tensor,
+        idx_mapping: torch.Tensor,
         num_rejected: Optional[torch.Tensor] = None,
-        idx_mapping: Optional[torch.Tensor] = None,
     ) -> None:
         """Update EMA of accepted tokens based on post-verification results.
 
         Args:
             num_sampled: [num_reqs] count of accepted tokens (1 bonus + accepted drafts)
-            num_rejected: Optional [num_reqs] count of rejected draft tokens (unused)
             idx_mapping: [num_reqs] request state index mapping
+            num_rejected: Optional [num_reqs] count of rejected draft tokens (unused)
         """
         if not self.enabled:
             return
 
-        if num_sampled.numel() == 0 or idx_mapping is None:
+        if num_sampled.numel() == 0:
             return
 
         idx_map = idx_mapping.to(device=self.device, dtype=torch.int64)

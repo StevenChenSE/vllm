@@ -428,9 +428,10 @@ def unified_attention_diffkv(
 
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
 
-    # Decide between 2D and 3D launch.  Mirrors the standard launcher:
-    # 3D requires preallocated softmax buffers, decode-only or spec-verify batches,
-    # and a small number of sequences (otherwise 2D already saturates the SM).
+    # Decide between 2D and 3D launch. Mirrors the standard launcher:
+    # 3D requires preallocated softmax buffers, decode-only or spec-verify
+    # batches, and a small number of sequences (otherwise 2D already
+    # saturates the compute units).
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None

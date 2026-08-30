@@ -94,6 +94,7 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+    max_spec_tokens: int = 1
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -181,6 +182,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 dtype=torch.int32,
                 device=device,
             )
+        spec_cfg = vllm_config.speculative_config
+        self.max_spec_tokens = (
+            spec_cfg.num_speculative_tokens + 1
+            if spec_cfg is not None
+            else 1
+        )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -245,6 +252,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
+            max_spec_tokens=self.max_spec_tokens,
         )
 
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
@@ -693,6 +701,7 @@ class TritonAttentionImpl(AttentionImpl):
             mm_prefix_clamp_sliding_window=getattr(
                 layer, "mm_prefix_clamp_sliding_window", False
             ),
+            max_spec_tokens=attn_metadata.max_spec_tokens,
         )
 
         return output

@@ -162,6 +162,13 @@ class KVBlockZeroer:
             if is_mamba:
                 # Mamba blocks map 1:1 to pool blocks (no virtual splitting).
                 ratio = 1
+                if group.kv_cache_group_id < len(kernel_block_sizes):
+                    kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+                    if spec.block_size != kernel_bs:
+                        raise ValueError(
+                            f"MambaSpec block_size {spec.block_size} does not "
+                            f"match kernel block size {kernel_bs}."
+                        )
             else:
                 kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
                 assert spec.block_size % kernel_bs == 0
@@ -177,20 +184,37 @@ class KVBlockZeroer:
                     # the full block stride preserved at dim 0. Register each
                     # state span as its own segment; the union covers the
                     # whole block's packed bytes.
+                    if kv is None:
+                        raise ValueError(
+                            f"Mamba layer '{layer_name}' has None or "
+                            f"uninitialized KV cache."
+                        )
                     states = (
                         kv if isinstance(kv, (tuple, list))
                         else (kv,) if isinstance(kv, torch.Tensor)
                         else ()
                     )
                     if not states:
-                        continue
+                        raise TypeError(
+                            f"Mamba layer '{layer_name}' KV cache expected "
+                            f"tuple, list, or Tensor, got {type(kv).__name__}"
+                        )
                     for state in states:
                         el = state.element_size()
                         block_stride_bytes = state.stride(0) * el
                         page_bytes = math.prod(state.shape[1:]) * el
-                        assert block_stride_bytes % 4 == 0
-                        assert page_bytes % 4 == 0
-                        assert (state.data_ptr()) % 4 == 0
+                        if (
+                            block_stride_bytes % 4 != 0
+                            or page_bytes % 4 != 0
+                            or (state.data_ptr()) % 4 != 0
+                        ):
+                            raise ValueError(
+                                f"Mamba layer '{layer_name}' state tensor "
+                                f"requires 4-byte alignment: "
+                                f"stride={block_stride_bytes}, "
+                                f"page_bytes={page_bytes}, "
+                                f"data_ptr={state.data_ptr()}"
+                            )
                         seg_addrs.append(state.data_ptr())
                         seg_block_strides.append(block_stride_bytes // 4)
                         seg_page_sizes.append(page_bytes // 4)

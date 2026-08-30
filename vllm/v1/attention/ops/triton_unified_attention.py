@@ -875,6 +875,7 @@ def unified_attention(
     # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
     # Default False keeps the original behavior for every other model.
     mm_prefix_clamp_sliding_window: bool = False,
+    max_spec_tokens: int | None = None,
 ):
     # Resolve causal: bool or per-seq tensor.
     use_per_seq_causal = isinstance(causal, torch.Tensor)
@@ -957,9 +958,12 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
+    max_verify_tokens = max_spec_tokens if max_spec_tokens is not None else 16
+
     # Launch the 2D kernel if
-    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. The batch includes prefill requests exceeding speculative verification limits (max_seqlen_q > 16 or q.shape[0] > seq_threshold_3D), or
+    # 1. No intermediate tiled softmax buffers for 3D kernel are allocated, or
+    # 2. Query length exceeds speculative verification limit (max_seqlen_q >
+    #    max_verify_tokens or q.shape[0] > seq_threshold_3D), or
     # 3. The number of sequences exceeds the configured threshold, or
     # 4. Batch invariance is enabled
     use_3d = not (
@@ -968,7 +972,7 @@ def unified_attention(
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 16
+        or max_seqlen_q > max_verify_tokens
         or q.shape[0] > seq_threshold_3D
         or num_seqs > seq_threshold_3D
         or is_batch_invariant

@@ -46,7 +46,8 @@ def test_adaptive_controller_basic_transitions():
     # Partial accept triggers EMA: (1 - 0.25) * 3.0 + 0.25 * 1.0 = 2.25 + 0.25 = 2.5
     assert abs(controller.acc_ema[req_idx].item() - 2.5) < 1e-4
 
-    # Next draft length: round(2.5) = 3 (or 2 depending on round direction, clamped >= n_min)
+    # Next draft length: round(2.5) = 3 (or 2 depending on round direction,
+    # clamped >= n_min)
     l3 = controller.get_effective_draft_length(req_idx)
     assert l3 in (2, 3)
 
@@ -139,13 +140,14 @@ def test_adaptive_controller_batch_vectorized():
 
         # Step 1: Batch update with mixed outcomes
         # req 0: full accept (n_accepted=2 >= n_drafted=2) -> probe 2.0 + 1.0 = 3.0
-        # req 1: partial accept (n_accepted=1 < n_drafted=2) -> decay (1-0.25)*2.0 + 0.25*1 = 1.75
+        # req 1: partial accept (n_accepted=1 < n_drafted=2) ->
+        # decay (1-0.25)*2.0 + 0.25*1 = 1.75
         # req 2: prefill step (num_sampled=0) -> skipped, draft_len preserved
         # req 3: full accept (n_accepted=2 >= n_drafted=2) -> probe 2.0 + 1.0 = 3.0
         num_sampled = torch.tensor([3, 2, 0, 3, 3, 3], dtype=torch.int32, device=dev)
         num_rejected = torch.tensor([0, 1, 0, 0, 0, 0], dtype=torch.int32, device=dev)
 
-        controller.update_acceptance(num_sampled, num_rejected, idx_mapping)
+        controller.update_acceptance(num_sampled, idx_mapping, num_rejected)
 
         assert abs(controller.acc_ema[0].item() - 3.0) < 1e-4
         assert abs(controller.acc_ema[1].item() - 1.75) < 1e-4
@@ -154,7 +156,8 @@ def test_adaptive_controller_batch_vectorized():
 
         assert controller.last_draft_len[0].item() == 0
         assert controller.last_draft_len[1].item() == 0
-        assert controller.last_draft_len[2].item() == 2  # preserved because num_sampled was 0
+        # Preserved because num_sampled was 0
+        assert controller.last_draft_len[2].item() == 2
         assert controller.last_draft_len[3].item() == 0
 
 
