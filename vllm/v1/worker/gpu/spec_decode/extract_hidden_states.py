@@ -103,6 +103,8 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        all_token_ids: torch.Tensor | None = None,
+        total_lens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del (
             last_hidden_states,
@@ -114,6 +116,8 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             dummy_run,
             mm_inputs,
             is_profile,
+            all_token_ids,
+            total_lens,
         )
 
         draft_tokens = last_sampled[input_batch.idx_mapping, :1]

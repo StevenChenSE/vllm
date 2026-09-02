@@ -1796,14 +1796,19 @@ def _get_packed_kv_cache_groups(
     return groups
 
 
-def _is_deepseek_v4_eagle(vllm_config: VllmConfig) -> bool:
+def _is_trailing_drafter_eagle(vllm_config: VllmConfig) -> bool:
     spec_config = vllm_config.speculative_config
     if spec_config is None or not spec_config.use_eagle():
         return False
     model_config = vllm_config.model_config
-    return (
-        model_config is not None and model_config.hf_config.model_type == "deepseek_v4"
-    )
+    if model_config is not None and model_config.hf_config.model_type == "deepseek_v4":
+        return True
+    # Trailing drafter architectures (e.g. MTP, DFlash) register their
+    # attention layers after the target model.
+    return spec_config.method in ("mtp", "dflash", "dflash2")
+
+
+_is_deepseek_v4_eagle = _is_trailing_drafter_eagle
 
 
 def _annotate_eagle_groups(
@@ -1991,11 +1996,14 @@ def get_kv_cache_groups(
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
+    # Trailing drafter fallback is only enabled when the drafter attention
+    # layers are registered after the target model (e.g. DeepSeek-V4, MTP,
+    # DFlash), preventing false EAGLE flagging on non-drafter tail layers.
     _annotate_eagle_groups(
         vllm_config,
         kv_cache_spec,
         groups,
-        use_deepseek_v4_fallback=True,
+        use_deepseek_v4_fallback=_is_trailing_drafter_eagle(vllm_config),
     )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups

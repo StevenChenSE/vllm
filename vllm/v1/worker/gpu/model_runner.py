@@ -2024,9 +2024,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.encoder_cache is not None or self.mm_spec_bypassed_req_ids
             ):
                 for i, req_id in enumerate(input_batch.req_ids):
-                    if (
-                        req_id in self.mm_spec_bypassed_req_ids
-                        or len(self.encoder_cache.mm_features.get(req_id, [])) > 0
+                    if req_id in self.mm_spec_bypassed_req_ids or (
+                        self.encoder_cache is not None
+                        and len(self.encoder_cache.mm_features.get(req_id, [])) > 0
                     ):
                         draft_tokens[i].fill_(-1)
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens

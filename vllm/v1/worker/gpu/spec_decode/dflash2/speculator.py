@@ -36,8 +36,9 @@ def _selector_walk_kernel(
     mask = offsets < top_k
     req_state = tl.load(req_state_ptr + row * num_steps)
     valid = req_state >= 0
-    temperature = tl.load(temperature_ptr + row, mask=valid, other=0.0)
-    seed = tl.load(seeds_ptr + row, mask=valid, other=0)
+    safe_req_state = tl.maximum(req_state, 0)
+    temperature = tl.load(temperature_ptr + safe_req_state, mask=valid, other=0.0)
+    seed = tl.load(seeds_ptr + safe_req_state, mask=valid, other=0)
     previous = 0
     active = True
     valid_count = 0

@@ -637,17 +637,23 @@ class DFlashSpeculator(DraftModelSpeculator):
                 else:
                     context_slots = context_slots[-max_sw:]
         elif max_sw is not None and num_reqs > 1:
-            q_start = input_batch.query_start_loc[: num_reqs + 1]
-            needs_slice = False
-            for r in range(num_reqs):
-                if int((q_start[r + 1] - q_start[r]).item()) > max_sw:
-                    needs_slice = True
-                    break
+            q_start_np = getattr(input_batch, "query_start_loc_np", None)
+            if q_start_np is not None:
+                q_lens = q_start_np[1 : num_reqs + 1] - q_start_np[:num_reqs]
+                needs_slice = bool((q_lens > max_sw).any())
+            else:
+                q_start = input_batch.query_start_loc[: num_reqs + 1]
+                q_lens = q_start[1:] - q_start[:-1]
+                needs_slice = bool((q_lens > max_sw).any().item())
             if needs_slice:
                 selected_indices = []
                 for r in range(num_reqs):
-                    start = int(q_start[r].item())
-                    end = int(q_start[r + 1].item())
+                    if q_start_np is not None:
+                        start = int(q_start_np[r])
+                        end = int(q_start_np[r + 1])
+                    else:
+                        start = int(q_start[r].item())
+                        end = int(q_start[r + 1].item())
                     req_len = end - start
                     if req_len > max_sw:
                         selected_indices.extend(range(end - max_sw, end))
@@ -906,12 +912,16 @@ def _prepare_dflash_inputs_kernel(
             out_seq_lens_ptr + req_idx,
             tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len),
         )
-        # Copy sampling state.
-        tl.store(
-            out_temperature_ptr + req_idx,
-            tl.load(temperature_ptr + req_state_idx),
-        )
-        tl.store(out_seeds_ptr + req_idx, tl.load(seeds_ptr + req_state_idx))
+        # Copy sampling state. Both state-indexed (for gumbel_sample and
+        # selector_walk) and row-indexed slots are populated so neither
+        # consumer suffers from slot recycling divergence.
+        cur_temp = tl.load(temperature_ptr + req_state_idx)
+        cur_seed = tl.load(seeds_ptr + req_state_idx)
+        tl.store(out_temperature_ptr + req_state_idx, cur_temp)
+        tl.store(out_seeds_ptr + req_state_idx, cur_seed)
+        if req_idx != req_state_idx:
+            tl.store(out_temperature_ptr + req_idx, cur_temp)
+            tl.store(out_seeds_ptr + req_idx, cur_seed)
         if req_idx == num_reqs - 1:
             # Pad per-request buffers to max_num_reqs for CUDA graph safety.
             last_query_end = num_reqs * num_query_per_req
