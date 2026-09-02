@@ -184,7 +184,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
         spec_cfg = vllm_config.speculative_config
         self.max_spec_tokens = (
-            spec_cfg.num_speculative_tokens + 1
+            (spec_cfg.num_speculative_tokens or 0) + 1
             if spec_cfg is not None
             else 1
         )

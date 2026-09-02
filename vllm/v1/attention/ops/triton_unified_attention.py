@@ -754,7 +754,9 @@ def reduce_segments(
         (overall_max == float("-inf")) | (overall_max != overall_max), 0.0, overall_max
     )
     segm_diff = tl.where(
-        (segm_max == float("-inf")) | (segm_max != segm_max), -10000.0, segm_max - overall_max_safe
+        (segm_max == float("-inf")) | (segm_max != segm_max),
+        -10000.0,
+        segm_max - overall_max_safe,
     )
 
     # load and rescale segment exp sums
@@ -781,14 +783,20 @@ def reduce_segments(
     )
     segm_weight_2d = segm_weight[:, None]
     segm_output = tl.where(
-        (segm_weight_2d == 0.0) | (segm_weight_2d != segm_weight_2d), 0.0, segm_output * segm_weight_2d
+        (segm_weight_2d == 0.0) | (segm_weight_2d != segm_weight_2d),
+        0.0,
+        segm_output * segm_weight_2d,
     )
     acc_sum = tl.sum(segm_output, axis=0)
     safe_expsum = tl.where(
-        (overall_expsum == 0.0) | (overall_expsum != overall_expsum), 1.0, overall_expsum
+        (overall_expsum == 0.0) | (overall_expsum != overall_expsum),
+        1.0,
+        overall_expsum,
     )
     acc = tl.where(
-        (overall_expsum == 0.0) | (overall_expsum != overall_expsum), 0.0, acc_sum / safe_expsum
+        (overall_expsum == 0.0) | (overall_expsum != overall_expsum),
+        0.0,
+        acc_sum / safe_expsum,
     )
 
     if USE_FP8:
@@ -925,6 +933,7 @@ def unified_attention(
             softmax_segm_output=softmax_segm_output,
             softmax_segm_max=softmax_segm_max,
             softmax_segm_expsum=softmax_segm_expsum,
+            max_spec_tokens=max_spec_tokens,
         )
         return
 

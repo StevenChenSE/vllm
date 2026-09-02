@@ -215,5 +215,6 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
             softmax_segm_output=attn_metadata.softmax_segm_output,
             softmax_segm_max=attn_metadata.softmax_segm_max,
             softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
+            max_spec_tokens=attn_metadata.max_spec_tokens,
         )
         return output

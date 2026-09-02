@@ -163,13 +163,12 @@ class KVBlockZeroer:
             if is_mamba:
                 # Mamba blocks map 1:1 to pool blocks (no virtual splitting).
                 ratio = 1
-                if group.kv_cache_group_id < len(kernel_block_sizes):
-                    kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
-                    if spec.block_size != kernel_bs:
-                        raise ValueError(
-                            f"MambaSpec block_size {spec.block_size} does not "
-                            f"match kernel block size {kernel_bs}."
-                        )
+                kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+                if spec.block_size != kernel_bs:
+                    raise ValueError(
+                        f"MambaSpec block_size {spec.block_size} does not "
+                        f"match kernel block size {kernel_bs}."
+                    )
             else:
                 kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
                 assert spec.block_size % kernel_bs == 0
@@ -521,6 +520,7 @@ def prepare_kernel_block_sizes(
             # pick an arbitrary one to dispatch.
             kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
         if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+            kernel_block_sizes.append(kv_cache_spec.block_size)
             continue
         if isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.

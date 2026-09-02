@@ -692,6 +692,7 @@ def _launch_packed_attn(
     softmax_segm_max,
     softmax_segm_expsum,
     packing_factor: int,
+    max_spec_tokens: int | None = None,
 ):
     """Launch ``_attn_packed`` for one of the sub-byte modes.
 
@@ -733,13 +734,17 @@ def _launch_packed_attn(
         head_size, sliding_window_val, q.element_size(), is_prefill=False
     )
 
+    max_verify_tokens = (
+        max_spec_tokens if max_spec_tokens is not None else 16
+    )
+
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 16
+        or max_seqlen_q > max_verify_tokens
         or q.shape[0] > seq_threshold_3D
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
@@ -906,6 +911,7 @@ def unified_attention_int4(
     softmax_segm_output: torch.Tensor | None = None,
     softmax_segm_max: torch.Tensor | None = None,
     softmax_segm_expsum: torch.Tensor | None = None,
+    max_spec_tokens: int | None = None,
 ) -> None:
     """Paged attention over the INT4 packed cache, writing into *out*.
 
@@ -944,6 +950,7 @@ def unified_attention_int4(
         softmax_segm_max=softmax_segm_max,
         softmax_segm_expsum=softmax_segm_expsum,
         packing_factor=_INT4_PACKING_FACTOR,
+        max_spec_tokens=max_spec_tokens,
     )
 
     out_f = single_rht(out.float(), inverse=True) / head_size

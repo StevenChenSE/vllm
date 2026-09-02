@@ -66,10 +66,18 @@ class AdaptiveSpecController:
     ) -> None:
         """Update EMA of accepted tokens based on post-verification results.
 
+        Note:
+            ``idx_mapping`` is a positional and required argument. The parameter
+            order is load-bearing; passing arguments positionally requires
+            ``(num_sampled, idx_mapping, ...)``.
+
         Args:
-            num_sampled: [num_reqs] count of accepted tokens (1 bonus + accepted drafts)
-            idx_mapping: [num_reqs] request state index mapping
-            num_rejected: Optional [num_reqs] count of rejected draft tokens (unused)
+            num_sampled: 1D int tensor of accepted token counts per request
+                slot (1 bonus + accepted draft tokens).
+            idx_mapping: 1D tensor mapping request slots to persistent batch
+                indices. Required.
+            num_rejected: Optional/deprecated tensor of rejected token counts
+                (unused).
         """
         if not self.enabled:
             return

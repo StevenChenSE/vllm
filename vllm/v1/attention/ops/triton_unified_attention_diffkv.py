@@ -403,6 +403,7 @@ def unified_attention_diffkv(
     softmax_segm_output: torch.Tensor | None = None,
     softmax_segm_max: torch.Tensor | None = None,
     softmax_segm_expsum: torch.Tensor | None = None,
+    max_spec_tokens: int | None = None,
 ):
     assert causal, "Only causal attention is supported"
 
@@ -428,6 +429,10 @@ def unified_attention_diffkv(
 
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
 
+    max_verify_tokens = (
+        max_spec_tokens if max_spec_tokens is not None else 16
+    )
+
     # Decide between 2D and 3D launch. Mirrors the standard launcher:
     # 3D requires preallocated softmax buffers, decode-only or spec-verify
     # batches, and a small number of sequences (otherwise 2D already
@@ -438,7 +443,7 @@ def unified_attention_diffkv(
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 16
+        or max_seqlen_q > max_verify_tokens
         or q.shape[0] > seq_threshold_3D
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
