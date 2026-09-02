@@ -24,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
+    iter_layer_specs,
 )
 from vllm.v1.request import Request
 
@@ -108,9 +109,18 @@ class KVCacheCoordinator(ABC):
         self.eagle_group_ids: set[int] = {
             i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
         }
-        # Conservatively fall back to flag all groups when no group is flagged.
+        # Conservatively fall back to flag all non-Mamba groups when no group
+        # is flagged. Mamba groups are recurrent states, not draft attention
+        # layers, and cannot satisfy the widened EAGLE lookup window.
         if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+            self.eagle_group_ids = {
+                i
+                for i, g in enumerate(kv_cache_config.kv_cache_groups)
+                if not any(
+                    isinstance(spec, MambaSpec)
+                    for spec in iter_layer_specs(g.kv_cache_spec)
+                )
+            }
 
         # During chunked prefill with EAGLE, the single next prefill lookahead
         # token past the chunk boundary is combined with the final hidden state

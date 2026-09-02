@@ -1991,7 +1991,12 @@ def get_kv_cache_groups(
             aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
             groups.append(KVCacheGroupSpec([name], aligned))
 
-    _annotate_eagle_groups(vllm_config, kv_cache_spec, groups)
+    _annotate_eagle_groups(
+        vllm_config,
+        kv_cache_spec,
+        groups,
+        use_deepseek_v4_fallback=True,
+    )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
     return groups
 
