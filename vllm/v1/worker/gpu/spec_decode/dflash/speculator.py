@@ -912,16 +912,14 @@ def _prepare_dflash_inputs_kernel(
             out_seq_lens_ptr + req_idx,
             tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len),
         )
-        # Copy sampling state. Both state-indexed (for gumbel_sample and
-        # selector_walk) and row-indexed slots are populated so neither
-        # consumer suffers from slot recycling divergence.
+        # Copy sampling state (state-indexed). All sampling consumers
+        # (gumbel_sample and _selector_walk_kernel) index by request state
+        # slot, so writing state-only avoids cross-program store races under
+        # request churn.
         cur_temp = tl.load(temperature_ptr + req_state_idx)
         cur_seed = tl.load(seeds_ptr + req_state_idx)
         tl.store(out_temperature_ptr + req_state_idx, cur_temp)
         tl.store(out_seeds_ptr + req_state_idx, cur_seed)
-        if req_idx != req_state_idx:
-            tl.store(out_temperature_ptr + req_idx, cur_temp)
-            tl.store(out_seeds_ptr + req_idx, cur_seed)
         if req_idx == num_reqs - 1:
             # Pad per-request buffers to max_num_reqs for CUDA graph safety.
             last_query_end = num_reqs * num_query_per_req
