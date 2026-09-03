@@ -1093,6 +1093,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.mm_spec_bypassed_req_ids.add(req_id)
                 else:
                     self.mm_spec_bypassed_req_ids.discard(req_id)
+                logger.debug(
+                    "MM_SPEC_DECISION req_id=%s has_active_mm=%s num_computed=%s mm_feats=%s",
+                    req_id,
+                    has_active_mm,
+                    new_req_data.num_computed_tokens,
+                    [
+                        (f.mm_position.offset, f.mm_position.length)
+                        for f in (new_req_data.mm_features or [])
+                    ],
+                )
 
             self.model_state.add_request(req_index, new_req_data)
             self.block_tables.append_block_ids(
