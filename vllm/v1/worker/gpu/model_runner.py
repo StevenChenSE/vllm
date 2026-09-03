@@ -1072,7 +1072,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.speculator is not None and not getattr(
                 self.speculator, "supports_mm_inputs", False
             ):
+                has_active_mm = False
                 if new_req_data.mm_features:
+                    if getattr(self.speculator, "supports_cached_mm_prefix", False):
+                        # If the drafter operates directly on target model decoder hidden states
+                        # (e.g. DFlash/DFlash2), only bypass if the request introduces uncomputed
+                        # multimodal features. When all multimodal items fall entirely within the
+                        # cached prefix (offset + length <= num_computed_tokens), the new prompt
+                        # tokens and generated tokens are purely textual, and the drafter can safely
+                        # speculate from target hidden states.
+                        has_active_mm = any(
+                            (f.mm_position.offset + f.mm_position.length)
+                            > new_req_data.num_computed_tokens
+                            for f in new_req_data.mm_features
+                        )
+                    else:
+                        has_active_mm = True
+
+                if has_active_mm:
                     self.mm_spec_bypassed_req_ids.add(req_id)
                 else:
                     self.mm_spec_bypassed_req_ids.discard(req_id)
@@ -2023,11 +2040,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if not getattr(self.speculator, "supports_mm_inputs", False) and (
                 self.encoder_cache is not None or self.mm_spec_bypassed_req_ids
             ):
+                supports_cached_mm = getattr(
+                    self.speculator, "supports_cached_mm_prefix", False
+                )
                 for i, req_id in enumerate(input_batch.req_ids):
-                    if req_id in self.mm_spec_bypassed_req_ids or (
-                        self.encoder_cache is not None
-                        and len(self.encoder_cache.mm_features.get(req_id, [])) > 0
-                    ):
+                    is_bypassed = req_id in self.mm_spec_bypassed_req_ids
+                    if not is_bypassed and not supports_cached_mm:
+                        is_bypassed = (
+                            self.encoder_cache is not None
+                            and len(self.encoder_cache.mm_features.get(req_id, [])) > 0
+                        )
+                    if is_bypassed:
                         draft_tokens[i].fill_(-1)
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:

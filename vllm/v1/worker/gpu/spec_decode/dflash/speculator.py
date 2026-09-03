@@ -110,8 +110,12 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.max_num_tokens, self.hidden_size, dtype=self.draft_model_config.dtype, device=device
         )
 
-        # Multimodal inputs not currently supported.
+        # Multimodal inputs not currently supported directly (no vision encoder).
         self.supports_mm_inputs = False
+        # DFlash operates directly on target model decoder hidden states; once past
+        # the multimodal prefix (all MM tokens cached), it can safely draft for
+        # pure text follow-up tokens in multi-turn conversations.
+        self.supports_cached_mm_prefix = True
 
         # Each request emits exactly (bonus + N mask) query tokens per step.
         self.num_query_per_req = 1 + self.num_speculative_steps
