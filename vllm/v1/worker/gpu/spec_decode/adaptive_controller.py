@@ -132,7 +132,10 @@ class AdaptiveSpecController:
         if req_state_idx < 0 or req_state_idx >= self.max_num_reqs:
             return cur_max
 
-        ema_val = float(self.acc_ema[req_state_idx].item())
+        if self.acc_ema.device.type != "cpu":
+            ema_val = float(self.acc_ema[req_state_idx].cpu().numpy())
+        else:
+            ema_val = float(self.acc_ema[req_state_idx])
         target_len = int(round(ema_val))
         eff_len = max(cur_min, min(cur_max, target_len))
 

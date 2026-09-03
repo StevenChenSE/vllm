@@ -458,6 +458,12 @@ class DFlashQwen3Model(nn.Module):
             eps=self.config.rms_norm_eps,
         )
 
+    @property
+    def dtype(self) -> torch.dtype:
+        if hasattr(self, "_hidden_norm_weight"):
+            return self._hidden_norm_weight.dtype
+        return self.hidden_norm.weight.dtype
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embeds = self.embed_tokens(input_ids)
         if self.has_separate_mask_embedding and self.mask_token_id is not None:
@@ -526,6 +532,10 @@ class DFlashQwen3Model(nn.Module):
         # RoPE parameters
         self._rope_head_size = attn0.rotary_emb.head_size
         self._rope_cos_sin_cache = attn0.rotary_emb.cos_sin_cache
+        if self._rope_cos_sin_cache.dtype != self.dtype:
+            self._rope_cos_sin_cache = self._rope_cos_sin_cache.to(
+                dtype=self.dtype
+            )
         self._rope_is_neox = attn0.rotary_emb.is_neox_style
         # Validation that RoPE params are the same across all layers
         for attn in layers_attn[1:]:
@@ -651,9 +661,11 @@ class DFlashQwen3Model(nn.Module):
         # In-place RoPE: pass K as the "query" arg with key=None.
         all_k_flat = all_k_normed.view(L * num_ctx, kv)
         positions_repeated = context_positions.repeat(L)
+        if self._rope_cos_sin_cache.dtype != all_k_flat.dtype:
+            self._rope_cos_sin_cache = self._rope_cos_sin_cache.to(
+                dtype=all_k_flat.dtype
+            )
         cos_sin_cache = self._rope_cos_sin_cache
-        if cos_sin_cache.dtype != all_k_flat.dtype:
-            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
         ops.rotary_embedding(
             positions_repeated,
             all_k_flat,
@@ -768,6 +780,10 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             )
         else:
             self.draft_id_to_target_id = None
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.model.dtype
 
     def embed_input_ids(
         self,
