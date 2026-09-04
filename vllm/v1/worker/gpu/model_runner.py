@@ -1075,17 +1075,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 has_active_mm = False
                 if new_req_data.mm_features:
                     if getattr(self.speculator, "supports_cached_mm_prefix", False):
-                        # If the drafter operates directly on target model decoder hidden states
-                        # (e.g. DFlash/DFlash2), only bypass if the request introduces uncomputed
-                        # multimodal features. When all multimodal items fall entirely within the
-                        # cached prefix (offset + length <= num_computed_tokens), the new prompt
-                        # tokens and generated tokens are purely textual, and the drafter can safely
-                        # speculate from target hidden states.
-                        has_active_mm = any(
-                            (f.mm_position.offset + f.mm_position.length)
-                            > new_req_data.num_computed_tokens
-                            for f in new_req_data.mm_features
-                        )
+                        # Drafters that operate directly on target model hidden states
+                        # (e.g. DFlash/DFlash2) do not consume raw prompt tokens or
+                        # embed multimodal placeholders; their context KV is projected
+                        # from target hidden states which already integrate vision representations.
+                        has_active_mm = False
                     else:
                         has_active_mm = True
 
@@ -1093,7 +1087,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.mm_spec_bypassed_req_ids.add(req_id)
                 else:
                     self.mm_spec_bypassed_req_ids.discard(req_id)
-                logger.debug(
+                logger.info(
                     "MM_SPEC_DECISION req_id=%s has_active_mm=%s num_computed=%s mm_feats=%s",
                     req_id,
                     has_active_mm,
@@ -2062,6 +2056,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         )
                     if is_bypassed:
                         draft_tokens[i].fill_(-1)
+                    if self.encoder_cache is not None and req_id in self.encoder_cache.mm_features:
+                        logger.info("MM_DRAFT_STEP req_id=%s is_bypassed=%s drafts=%s", req_id, is_bypassed, draft_tokens[i][:5].tolist())
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
